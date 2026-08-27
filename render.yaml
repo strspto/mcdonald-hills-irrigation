@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: mcdonald-hills-irrigation
+    runtime: node
+    plan: starter # Starter (not Free) so the scheduler keeps running and doesn't spin down
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATABASE_URL
+        sync: false # paste your Supabase connection string in the Render dashboard
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: NODE_ENV
+        value: production
