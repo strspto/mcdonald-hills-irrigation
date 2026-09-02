@@ -509,12 +509,12 @@ async function programsPage(req) {
         <div class="form-row">
           <label>Type</label>
           <div class="checkbox-row">
-            <label class="day-pill ${isOnDemand ? '' : 'checked'}">
+            <label class="type-pill ${isOnDemand ? '' : 'checked'}">
               <input type="radio" name="program_type" value="scheduled" ${isOnDemand ? '' : 'checked'}
-                onclick="document.getElementById('scheduled-fields').style.display='';this.closest('.checkbox-row').querySelectorAll('.day-pill').forEach(l=>l.classList.remove('checked'));this.parentElement.classList.add('checked')"> Scheduled</label>
-            <label class="day-pill ${isOnDemand ? 'checked' : ''}">
+                onclick="document.getElementById('scheduled-fields').style.display='';this.closest('.checkbox-row').querySelectorAll('.type-pill').forEach(l=>l.classList.remove('checked'));this.parentElement.classList.add('checked')"> Scheduled</label>
+            <label class="type-pill ${isOnDemand ? 'checked' : ''}">
               <input type="radio" name="program_type" value="on_demand" ${isOnDemand ? 'checked' : ''}
-                onclick="document.getElementById('scheduled-fields').style.display='none';this.closest('.checkbox-row').querySelectorAll('.day-pill').forEach(l=>l.classList.remove('checked'));this.parentElement.classList.add('checked')"> Run on demand</label>
+                onclick="document.getElementById('scheduled-fields').style.display='none';this.closest('.checkbox-row').querySelectorAll('.type-pill').forEach(l=>l.classList.remove('checked'));this.parentElement.classList.add('checked')"> Run on demand</label>
           </div>
           <p class="muted" style="font-size:0.82rem;margin:0.35rem 0 0">Scheduled programs run automatically at a set time on chosen days. On-demand programs don't run on their own — anyone can hit <strong>Run Now</strong> on the Programs page to start them instantly. Good for hot spots that can't be on a fixed timer because golfers might be on the green.</p>
         </div>

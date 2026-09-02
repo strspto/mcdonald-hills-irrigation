@@ -161,6 +161,10 @@ input[type=text], input[type=password], input[type=number], input[type=time], se
 .day-pill input { display:none; }
 .day-pill.checked { background: var(--green-600); border-color: var(--green-600); color:#fff; }
 
+.type-pill { display:inline-flex; align-items:center; justify-content:center; padding:0.5rem 1rem; border-radius:999px; border:1px solid #cfd8cf; cursor:pointer; font-size:0.85rem; white-space:nowrap; }
+.type-pill input { display:none; }
+.type-pill.checked { background: var(--green-600); border-color: var(--green-600); color:#fff; }
+
 .flash { padding: 0.7rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
 .flash-success { background:#e2f4e8; color: var(--green-700); }
 .flash-error { background:#fdeee9; color: var(--red); }
