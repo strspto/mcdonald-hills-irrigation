@@ -1,0 +1,19 @@
+{
+  "name": "mcdonald-hills-irrigation",
+  "version": "1.0.0",
+  "description": "Irrigation scheduler for the Hunter Pro-HC PHC-2400 (McDonald Hills GC)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "connect-pg-simple": "^9.0.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-session": "^1.18.0",
+    "luxon": "^3.4.4",
+    "pg": "^8.11.5"
+  }
+}
