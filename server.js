@@ -209,7 +209,7 @@ app.get('/dashboard', requireLogin, async (req, res) => {
 
   let zoneCards = '';
   for (const z of zones) {
-    const status = await hc.zoneStatus(z.id);
+    const status = await hc.zoneStatus(z);
     zoneCards += `
     <div class="zone-card">
       <div class="zone-num">Zone ${z.number}</div>
@@ -305,7 +305,7 @@ async function manualPage(req) {
 
   let zoneCards = '';
   for (const z of zones) {
-    const status = await hc.zoneStatus(z.id);
+    const status = await hc.zoneStatus(z);
     zoneCards += `
     <div class="zone-card">
       <div class="zone-num">Zone ${z.number}</div>
