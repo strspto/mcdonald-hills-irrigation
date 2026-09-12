@@ -256,12 +256,24 @@ app.post('/manual', requireLogin, requireCsrf, async (req, res) => {
   if (action === 'runall' || action === 'stopall') {
     const { rows: zones } = await query('SELECT * FROM zones WHERE enabled = true ORDER BY number');
     const minutes = Math.max(1, parseInt(req.body.minutes, 10) || 10);
-    for (const z of zones) {
-      if (action === 'runall') await hc.runZone(z, minutes, actor);
-      else await hc.stopZone(z, actor);
+
+    if (action === 'runall') {
+      // Zones water ONE AT A TIME, in sequence — see the comment on
+      // runProgramZones() below for why (shared water pressure, and
+      // Hydrawise's real rate limit). "Run All" starts zone 1 now,
+      // zone 2 once zone 1's `minutes` have elapsed, and so on.
+      dispatchSequentialRuns(zones.map((z) => ({ zone: z, minutes })), hc, actor, null);
+    } else {
+      // Stop has no natural "duration" to space by, but the same rate
+      // limit still applies — space stops out safely instead of firing
+      // all of them in the same instant.
+      dispatchSequentialStops(zones, hc, actor);
     }
+
     await logRun(null, null, action, action === 'runall' ? minutes : null, actor, 'success', 'All enabled zones');
-    flash(req, 'success', action === 'runall' ? `Started all zones for ${minutes} minutes.` : 'Stopped all zones.');
+    flash(req, 'success', action === 'runall'
+      ? `Starting all zones in sequence, ${minutes} minutes each.`
+      : 'Stopping all zones (spaced out to stay within Hydrawise\'s rate limit).');
     return res.redirect('/manual');
   }
 
@@ -836,18 +848,76 @@ app.get('/healthz', (req, res) => res.send('ok'));
 // needed. Safe to run every minute: a program already triggered today is
 // skipped so it won't double-fire even if the tick is late or overlaps.
 
+// A fixed spacing (in ms) used only for actions with no natural "how long
+// does this zone run" duration to space by (currently: bulk Stop). Chosen
+// so that even the largest realistic zone count (24) firing back-to-back
+// at this interval stays comfortably under Hydrawise's real limit of 10
+// requests per 5-minute window.
+const SEQUENTIAL_STOP_SPACING_MS = 35000; // 35s -> ~8.5 requests per 5 min
+
+/**
+ * Fires a list of { zone, minutes } run commands ONE AT A TIME: the first
+ * fires immediately, each next one only once the previous zone's `minutes`
+ * have elapsed. This matters for two reasons:
+ *   1. Real irrigation zones share one water supply/pressure — they're
+ *      meant to run in sequence, not all open at once.
+ *   2. Hydrawise's real API rate-limits to 10 requests per 5 minutes on
+ *      this endpoint; firing many zones back-to-back blows through that
+ *      instantly (a >10-zone program used to fail partway through every
+ *      single night, silently).
+ * Only the first zone's dispatch is awaited — the rest are scheduled via
+ * setTimeout and run in the background, so this doesn't block the
+ * caller (an HTTP request, or the once-a-minute scheduler tick) for the
+ * program's full multi-hour duration. This assumes the Node process
+ * keeps running continuously, which the existing scheduler already
+ * requires (see the Starter-plan note in the README).
+ */
+async function dispatchSequentialRuns(runs, hc, triggeredBy, programId) {
+  let cumulativeDelayMs = 0;
+  for (let i = 0; i < runs.length; i++) {
+    const { zone, minutes } = runs[i];
+    if (i === 0) {
+      await hc.runZone(zone, minutes, triggeredBy, programId);
+    } else {
+      const delay = cumulativeDelayMs;
+      setTimeout(() => {
+        hc.runZone(zone, minutes, triggeredBy, programId)
+          .catch((err) => console.error(`Sequential run failed for zone ${zone.id}:`, err));
+      }, delay);
+    }
+    cumulativeDelayMs += minutes * 60000;
+  }
+}
+
+/** Same idea as dispatchSequentialRuns, but for Stop — no natural duration to space by, so a fixed safe interval is used instead. */
+async function dispatchSequentialStops(zones, hc, triggeredBy) {
+  for (let i = 0; i < zones.length; i++) {
+    const z = zones[i];
+    if (i === 0) {
+      await hc.stopZone(z, triggeredBy);
+    } else {
+      const delay = i * SEQUENTIAL_STOP_SPACING_MS;
+      setTimeout(() => {
+        hc.stopZone(z, triggeredBy)
+          .catch((err) => console.error(`Sequential stop failed for zone ${z.id}:`, err));
+      }, delay);
+    }
+  }
+}
+
 /** Starts every zone in a program (used by the scheduler and by "Run Now"). */
 async function runProgramZones(program, hc, triggeredBy) {
-  const { rows: zones } = await query(
+  const { rows: zoneRows } = await query(
     `SELECT z.*, pz.duration_minutes FROM program_zones pz JOIN zones z ON z.id = pz.zone_id
      WHERE pz.program_id = $1 AND z.enabled = true ORDER BY pz.sort_order`,
     [program.id]
   );
-  for (const z of zones) {
-    const minutes = Math.max(1, Math.round(z.duration_minutes * (program.seasonal_adjust_pct / 100)));
-    await hc.runZone(z, minutes, triggeredBy, program.id);
-  }
-  return zones.length;
+  const runs = zoneRows.map((z) => ({
+    zone: z,
+    minutes: Math.max(1, Math.round(z.duration_minutes * (program.seasonal_adjust_pct / 100))),
+  }));
+  await dispatchSequentialRuns(runs, hc, triggeredBy, program.id);
+  return runs.length;
 }
 
 async function schedulerTick() {
