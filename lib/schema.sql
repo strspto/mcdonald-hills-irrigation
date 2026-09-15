@@ -62,5 +62,25 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT
 );
 
+-- Zones queued to fire later as part of a sequential "Run All" or program
+-- run. This exists so a multi-zone sequence survives a server restart:
+-- everything after the FIRST zone used to be scheduled purely in-memory
+-- (setTimeout), which meant a Render redeploy or restart silently lost
+-- every zone still waiting its turn, with no error logged anywhere. The
+-- once-a-minute scheduler tick now also sweeps this table, so a queued
+-- zone fires even if the process that queued it is long gone by the time
+-- fire_at arrives.
+CREATE TABLE IF NOT EXISTS pending_zone_runs (
+    id            SERIAL PRIMARY KEY,
+    zone_id       INTEGER NOT NULL REFERENCES zones(id),
+    program_id    INTEGER REFERENCES programs(id),
+    action        TEXT NOT NULL CHECK (action IN ('run','stop')),
+    minutes       INTEGER,
+    triggered_by  TEXT NOT NULL,
+    fire_at       TIMESTAMPTZ NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_run_log_ts ON run_log(ts);
 CREATE INDEX IF NOT EXISTS idx_program_zones_program ON program_zones(program_id);
+CREATE INDEX IF NOT EXISTS idx_pending_zone_runs_fire_at ON pending_zone_runs(fire_at);
