@@ -215,7 +215,7 @@ app.get('/dashboard', requireLogin, async (req, res) => {
       <div class="zone-num">Zone ${z.number}</div>
       <h3>${e(z.name)}</h3>
       <span class="status-pill status-${status.state}">${status.state[0].toUpperCase() + status.state.slice(1)}</span>
-      ${status.detail ? `<div class="muted" style="font-size:0.8rem">${e(status.detail)}</div>` : ''}
+      ${status.state === 'running' && status.endsAt ? `<div class="muted countdown" style="font-size:0.8rem" data-ends-at="${status.endsAt}"></div>` : (status.detail ? `<div class="muted" style="font-size:0.8rem">${e(status.detail)}</div>` : '')}
       ${!z.enabled ? '<div class="muted" style="font-size:0.78rem">Disabled</div>' : ''}
     </div>`;
   }
@@ -323,7 +323,7 @@ async function manualPage(req) {
       <div class="zone-num">Zone ${z.number}</div>
       <h3>${e(z.name)}</h3>
       <span class="status-pill status-${status.state}">${status.state[0].toUpperCase() + status.state.slice(1)}</span>
-      ${status.detail ? `<div class="muted" style="font-size:0.8rem">${e(status.detail)}</div>` : ''}
+      ${status.state === 'running' && status.endsAt ? `<div class="muted countdown" style="font-size:0.8rem" data-ends-at="${status.endsAt}"></div>` : (status.detail ? `<div class="muted" style="font-size:0.8rem">${e(status.detail)}</div>` : '')}
       <div class="zone-actions">
         <form method="post" action="/manual" style="display:flex;gap:0.3rem;align-items:center">
           ${csrfField(req)}
@@ -865,12 +865,16 @@ const SEQUENTIAL_STOP_SPACING_MS = 35000; // 35s -> ~8.5 requests per 5 min
  *      this endpoint; firing many zones back-to-back blows through that
  *      instantly (a >10-zone program used to fail partway through every
  *      single night, silently).
- * Only the first zone's dispatch is awaited — the rest are scheduled via
- * setTimeout and run in the background, so this doesn't block the
- * caller (an HTTP request, or the once-a-minute scheduler tick) for the
- * program's full multi-hour duration. This assumes the Node process
- * keeps running continuously, which the existing scheduler already
- * requires (see the Starter-plan note in the README).
+ * Only the first zone fires immediately (awaited) — every zone after that
+ * is QUEUED in the database with a fire_at timestamp, not scheduled with
+ * setTimeout. An in-memory timer only survives as long as this exact
+ * process keeps running; a Render restart mid-sequence (a redeploy, a
+ * health check, anything) silently drops every timer with it and nothing
+ * after that point ever fires — no error, just silence, which is exactly
+ * what was happening (a 19-zone "Run All" failing partway through at a
+ * different zone each time, depending on when a restart happened to land).
+ * The once-a-minute scheduler tick sweeps this queue, so a queued zone
+ * fires on schedule even if the process that queued it is long gone.
  */
 async function dispatchSequentialRuns(runs, hc, triggeredBy, programId) {
   let cumulativeDelayMs = 0;
@@ -879,30 +883,57 @@ async function dispatchSequentialRuns(runs, hc, triggeredBy, programId) {
     if (i === 0) {
       await hc.runZone(zone, minutes, triggeredBy, programId);
     } else {
-      const delay = cumulativeDelayMs;
-      setTimeout(() => {
-        hc.runZone(zone, minutes, triggeredBy, programId)
-          .catch((err) => console.error(`Sequential run failed for zone ${zone.id}:`, err));
-      }, delay);
+      const fireAt = new Date(Date.now() + cumulativeDelayMs);
+      await query(
+        `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at)
+         VALUES ($1,$2,'run',$3,$4,$5)`,
+        [zone.id, programId, minutes, triggeredBy, fireAt]
+      );
     }
     cumulativeDelayMs += minutes * 60000;
   }
 }
 
-/** Same idea as dispatchSequentialRuns, but for Stop — no natural duration to space by, so a fixed safe interval is used instead. */
+/** Same idea as dispatchSequentialRuns, but for Stop — no natural duration to space by, so a fixed safe interval is used instead. Also DB-queued for the same restart-safety reason. */
 async function dispatchSequentialStops(zones, hc, triggeredBy) {
   for (let i = 0; i < zones.length; i++) {
     const z = zones[i];
     if (i === 0) {
       await hc.stopZone(z, triggeredBy);
     } else {
-      const delay = i * SEQUENTIAL_STOP_SPACING_MS;
-      setTimeout(() => {
-        hc.stopZone(z, triggeredBy)
-          .catch((err) => console.error(`Sequential stop failed for zone ${z.id}:`, err));
-      }, delay);
+      const fireAt = new Date(Date.now() + i * SEQUENTIAL_STOP_SPACING_MS);
+      await query(
+        `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at)
+         VALUES ($1,NULL,'stop',NULL,$2,$3)`,
+        [z.id, triggeredBy, fireAt]
+      );
     }
   }
+}
+
+/** Fires any queued zone whose scheduled time has arrived. Called every scheduler tick (every ~60s), so a queued zone fires within about a minute of its fire_at even across a server restart. */
+async function runDuePendingZones(hc) {
+  const { rows: due } = await query(
+    `DELETE FROM pending_zone_runs WHERE fire_at <= now() RETURNING *`
+  );
+  for (const row of due) {
+    try {
+      const { rows: zoneRows } = await query('SELECT * FROM zones WHERE id = $1', [row.zone_id]);
+      const zone = zoneRows[0];
+      if (!zone) {
+        console.error(`[pending run] zone ${row.zone_id} no longer exists, skipping`);
+        continue;
+      }
+      if (row.action === 'run') {
+        await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id);
+      } else {
+        await hc.stopZone(zone, row.triggered_by);
+      }
+    } catch (err) {
+      console.error(`[pending run] failed for zone ${row.zone_id} (action=${row.action}):`, err);
+    }
+  }
+  if (due.length) console.log(`[pending run] fired ${due.length} queued zone command(s)`);
 }
 
 /** Starts every zone in a program (used by the scheduler and by "Run Now"). */
@@ -927,12 +958,18 @@ async function schedulerTick() {
     const todayDow = now.weekday % 7; // Sun=0..Sat=6
     const todayDate = now.toFormat('yyyy-MM-dd');
 
+    const hc = await HydrawiseClient.create();
+
+    // Fire anything queued from an earlier sequential run/stop whose time
+    // has now arrived — this runs every tick regardless of whether a
+    // scheduled program is also firing right now.
+    await runDuePendingZones(hc);
+
     // Only 'scheduled' programs are eligible to auto-fire — on_demand programs
     // are stored with days_mask=0 anyway, but this keeps the intent explicit.
     const { rows: programs } = await query(
       `SELECT * FROM programs WHERE enabled = true AND program_type = 'scheduled'`
     );
-    const hc = await HydrawiseClient.create();
 
     for (const p of programs) {
       if (p.start_time !== nowHM) continue;
