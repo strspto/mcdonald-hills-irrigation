@@ -565,7 +565,7 @@ async function programsPage(req) {
     const zoneSummary = zr.rows.map((r) => `Z${r.number} (${r.duration_minutes}m)`).join(', ') || '—';
     const scheduleCells = p.program_type === 'on_demand'
       ? `<td colspan="2" class="muted">On demand</td>`
-      : `<td>${e(fmtTime(DateTime.fromFormat(p.start_time, 'HH:mm').toMillis()))}</td><td class="muted">${e(daysMaskToLabels(p.days_mask))}</td>`;
+      : `<td>${e(fmtTime(DateTime.fromFormat(p.start_time, 'HH:mm', { zone: TZ }).toMillis()))}</td><td class="muted">${e(daysMaskToLabels(p.days_mask))}</td>`;
     listRows += `
     <tr>
       <td>${e(p.name)}</td>
