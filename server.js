@@ -972,8 +972,14 @@ async function schedulerTick() {
     );
 
     for (const p of programs) {
-      if (p.start_time !== nowHM) continue;
       if (!(p.days_mask & (1 << todayDow))) continue;
+      // Was time to start >= now, not "is it exactly this minute" — a
+      // restart that makes the process miss the exact trigger minute
+      // (the same issue the pending-zone queue above exists to guard
+      // against) would otherwise mean the program silently never fires
+      // for the entire day. Firing a few minutes late is far better
+      // than not firing at all.
+      if (nowHM < p.start_time) continue;
 
       const { rows: already } = await query(
         `SELECT COUNT(*)::int AS c FROM run_log WHERE program_id = $1 AND action = 'run' AND ts::date = $2::date`,
