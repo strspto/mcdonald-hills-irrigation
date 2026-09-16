@@ -50,9 +50,9 @@ function wantsAdmin(req) {
 
 app.get('/', (req, res) => res.redirect(currentUser(req) ? '/dashboard' : '/login'));
 
-app.get('/login', (req, res) => {
+app.get('/login', async (req, res) => {
   if (currentUser(req)) return res.redirect('/dashboard');
-  res.send(loginPage(req));
+  res.send(await loginPage(req));
 });
 
 app.post('/login', requireCsrf, async (req, res) => {
@@ -61,10 +61,29 @@ app.post('/login', requireCsrf, async (req, res) => {
   if (await attemptLogin(req, username || '', password || '')) {
     return res.redirect('/dashboard');
   }
-  res.send(loginPage(req, 'Incorrect username or password.'));
+  res.send(await loginPage(req, 'Incorrect username or password.'));
 });
 
-function loginPage(req, error) {
+/**
+ * Only shows the default-login hint while the admin account genuinely
+ * still has the seeded 'changeme123' password. Previously this text was
+ * always shown, meaning it kept advertising a live, working password to
+ * every visitor indefinitely — even to people who never needed the
+ * first-time-setup hint at all. Once the admin password is changed from
+ * the Users page, this check fails and the hint disappears for good.
+ */
+async function loginPage(req, error) {
+  let showDefaultHint = false;
+  try {
+    const { rows } = await query('SELECT password_hash FROM users WHERE username = $1', ['admin']);
+    if (rows[0]) showDefaultHint = await bcrypt.compare('changeme123', rows[0].password_hash);
+  } catch (e) {
+    console.error('Failed to check default-credential status for login hint:', e.message);
+    // Fail closed — if we can't confirm the password was changed, don't
+    // keep advertising it.
+    showDefaultHint = false;
+  }
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -93,8 +112,8 @@ function loginPage(req, error) {
     <div class="form-row"><label for="password">Password</label><input type="password" id="password" name="password" required></div>
     <button type="submit" style="width:100%">Log in</button>
     <p class="muted" style="font-size:0.78rem;margin-top:1rem">
-      First time setup? Default logins are <strong>admin</strong> / <strong>changeme123</strong> and
-      <strong>crew</strong> / <strong>changeme123</strong> — change these immediately from the Users page.
+      ${showDefaultHint ? `First time setup? Default logins are <strong>admin</strong> / <strong>changeme123</strong> and
+      <strong>crew</strong> / <strong>changeme123</strong> — change these immediately from the Users page.` : ''}
     </p>
   </form>
 </div>
