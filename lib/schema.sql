@@ -78,8 +78,17 @@ CREATE TABLE IF NOT EXISTS pending_zone_runs (
     minutes       INTEGER,
     triggered_by  TEXT NOT NULL,
     fire_at       TIMESTAMPTZ NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    remaining_runs JSONB
 );
+
+-- Applies to already-deployed databases too. Holds the rest of a
+-- program's zone queue ([{zone_id, minutes}, ...]) so each next zone can
+-- be scheduled relative to when THIS row actually fires, instead of off
+-- a single fixed plan computed at the start of the whole sequence. See
+-- the comment on queueNextRun() in server.js for why that distinction
+-- matters.
+ALTER TABLE pending_zone_runs ADD COLUMN IF NOT EXISTS remaining_runs JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_run_log_ts ON run_log(ts);
 CREATE INDEX IF NOT EXISTS idx_program_zones_program ON program_zones(program_id);
