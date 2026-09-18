@@ -237,7 +237,7 @@ app.get('/dashboard', requireLogin, async (req, res) => {
       [row.program.id]
     );
     const names = zr.map((r) => r.name).join(', ') || '—';
-    upcomingRows += `<tr><td>${e(fmtDayTime(row.ts))}</td><td>${e(row.program.name)}</td><td class="muted">${e(names)}</td></tr>`;
+    upcomingRows += `<tr><td data-label="When">${e(fmtDayTime(row.ts))}</td><td data-label="Program">${e(row.program.name)}</td><td data-label="Zones" class="muted">${e(names)}</td></tr>`;
   }
 
   let zoneCards = '';
@@ -267,7 +267,7 @@ ${quickRunHtml}
   <h2 style="margin-top:0;font-size:1rem">Upcoming scheduled runs</h2>
   ${!upcoming.length
     ? `<p class="empty-state">No upcoming runs. ${u.role === 'admin' ? '<a href="/programs">Create a program</a> to get started.' : 'Ask an admin to set up a watering program.'}</p>`
-    : `<table><thead><tr><th>When</th><th>Program</th><th>Zones</th></tr></thead><tbody>${upcomingRows}</tbody></table>`}
+    : `<table class="responsive"><thead><tr><th>When</th><th>Program</th><th>Zones</th></tr></thead><tbody>${upcomingRows}</tbody></table>`}
 </div>
 <h2 style="font-size:1rem">Zones</h2>
 <div class="grid">${zoneCards}</div>` + footer();
@@ -597,14 +597,14 @@ async function programsPage(req) {
     );
     const zoneSummary = zr.rows.map((r) => `Z${r.number} (${r.duration_minutes}m)`).join(', ') || '—';
     const scheduleCells = p.program_type === 'on_demand'
-      ? `<td colspan="2" class="muted">On demand</td>`
-      : `<td>${e(fmtTime(DateTime.fromFormat(p.start_time, 'HH:mm', { zone: TZ }).toMillis()))}</td><td class="muted">${e(daysMaskToLabels(p.days_mask))}</td>`;
+      ? `<td data-label="Schedule" colspan="2" class="muted">On demand</td>`
+      : `<td data-label="Start">${e(fmtTime(DateTime.fromFormat(p.start_time, 'HH:mm', { zone: TZ }).toMillis()))}</td><td data-label="Days" class="muted">${e(daysMaskToLabels(p.days_mask))}</td>`;
     listRows += `
     <tr>
-      <td>${e(p.name)}</td>
+      <td data-label="Name">${e(p.name)}</td>
       ${scheduleCells}
-      <td class="muted">${e(zoneSummary)}</td>
-      <td>${p.enabled ? 'Enabled' : '<span class="muted">Disabled</span>'}</td>
+      <td data-label="Zones" class="muted">${e(zoneSummary)}</td>
+      <td data-label="Status">${p.enabled ? 'Enabled' : '<span class="muted">Disabled</span>'}</td>
       <td class="right">
         ${p.enabled ? `
         <form method="post" action="/programs/${p.id}/run" style="display:inline">
@@ -631,7 +631,7 @@ ${editFormHtml}
 <div class="card">
   ${!programs.length
     ? `<p class="empty-state">No programs yet. ${isAdmin ? '<a href="/programs?new=1">Create your first program</a>.' : 'Ask an admin to set one up.'}</p>`
-    : `<table><thead><tr><th>Name</th><th>Start</th><th>Days</th><th>Zones</th><th>Status</th><th></th></tr></thead><tbody>${listRows}</tbody></table>`}
+    : `<table class="responsive"><thead><tr><th>Name</th><th>Start</th><th>Days</th><th>Zones</th><th>Status</th><th></th></tr></thead><tbody>${listRows}</tbody></table>`}
 </div>` + footer();
   return html;
 }
@@ -642,10 +642,10 @@ app.get('/zones', requireAdmin, async (req, res) => {
   const { rows: zones } = await query('SELECT * FROM zones ORDER BY number');
   const rows = zones.map((z) => `
     <tr>
-      <td>#${z.number}<input type="hidden" name="id[]" value="${z.id}"></td>
-      <td><input type="text" name="name[]" value="${e(z.name)}"></td>
-      <td><input type="text" name="relay[]" value="${e(z.hydrawise_relay_id || '')}" placeholder="(optional)"></td>
-      <td><input type="checkbox" name="enabled[]" value="${z.id}" ${z.enabled ? 'checked' : ''}></td>
+      <td data-label="Station">#${z.number}<input type="hidden" name="id[]" value="${z.id}"></td>
+      <td data-label="Name"><input type="text" name="name[]" value="${e(z.name)}"></td>
+      <td data-label="Relay ID"><input type="text" name="relay[]" value="${e(z.hydrawise_relay_id || '')}" placeholder="(optional)"></td>
+      <td data-label="Enabled"><input type="checkbox" name="enabled[]" value="${z.id}" ${z.enabled ? 'checked' : ''}></td>
     </tr>`).join('');
 
   let html = await header(req, { title: 'Zones', activeNav: 'zones' });
@@ -654,7 +654,7 @@ app.get('/zones', requireAdmin, async (req, res) => {
 <div class="card">
   <form method="post" action="/zones">
     ${csrfField(req)}
-    <table><thead><tr><th style="width:4rem">Station</th><th>Name</th><th style="width:10rem">Hydrawise Relay ID</th><th style="width:5rem">Enabled</th></tr></thead><tbody>${rows}</tbody></table>
+    <table class="responsive"><thead><tr><th style="width:4rem">Station</th><th>Name</th><th style="width:10rem">Hydrawise Relay ID</th><th style="width:5rem">Enabled</th></tr></thead><tbody>${rows}</tbody></table>
     <div style="margin-top:1rem"><button type="submit">Save Zones</button></div>
   </form>
 </div>` + footer();
@@ -688,9 +688,9 @@ app.get('/users', requireAdmin, async (req, res) => {
   const { rows: users } = await query('SELECT * FROM users ORDER BY role, username');
   const rows = users.map((row) => `
     <tr>
-      <td>${e(row.full_name)}${row.must_change_password ? ' <span class="muted" style="font-size:0.78rem">(must set password)</span>' : ''}</td>
-      <td>${e(row.username)}</td>
-      <td><span class="badge-role">${e(row.role)}</span></td>
+      <td data-label="Name">${e(row.full_name)}${row.must_change_password ? ' <span class="muted" style="font-size:0.78rem">(must set password)</span>' : ''}</td>
+      <td data-label="Username">${e(row.username)}</td>
+      <td data-label="Role"><span class="badge-role">${e(row.role)}</span></td>
       <td class="right">
         <form method="post" action="/users" style="display:inline">
           ${csrfField(req)}<input type="hidden" name="action" value="reset_password"><input type="hidden" name="id" value="${row.id}">
@@ -717,7 +717,7 @@ app.get('/users', requireAdmin, async (req, res) => {
     <button type="submit">Add User</button>
   </form>
 </div>
-<div class="card"><table><thead><tr><th>Name</th><th>Username</th><th>Role</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` + footer();
+<div class="card"><table class="responsive"><thead><tr><th>Name</th><th>Username</th><th>Role</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` + footer();
   res.send(html);
 });
 
@@ -849,12 +849,12 @@ app.get('/log', requireLogin, async (req, res) => {
 
   const rowsHtml = rows.map((r) => `
     <tr>
-      <td class="muted">${e(fmtLogTime(r.ts))}</td>
-      <td>${r.zone_name ? e(`Z${r.zone_number} ${r.zone_name}`) : '<span class="muted">all zones</span>'}</td>
-      <td>${e(r.action[0].toUpperCase() + r.action.slice(1))}${r.duration_minutes ? ` (${r.duration_minutes}m)` : ''}</td>
-      <td class="muted">${r.program_name ? e(r.program_name) : 'Manual'}</td>
-      <td class="muted">${e(r.triggered_by.startsWith('user:') ? r.triggered_by.split(':')[2] : r.triggered_by)}</td>
-      <td>
+      <td data-label="When" class="muted">${e(fmtLogTime(r.ts))}</td>
+      <td data-label="Zone">${r.zone_name ? e(`Z${r.zone_number} ${r.zone_name}`) : '<span class="muted">all zones</span>'}</td>
+      <td data-label="Action">${e(r.action[0].toUpperCase() + r.action.slice(1))}${r.duration_minutes ? ` (${r.duration_minutes}m)` : ''}</td>
+      <td data-label="Source" class="muted">${r.program_name ? e(r.program_name) : 'Manual'}</td>
+      <td data-label="Triggered by" class="muted">${e(r.triggered_by.startsWith('user:') ? r.triggered_by.split(':')[2] : r.triggered_by)}</td>
+      <td data-label="Result">
         ${r.status === 'success' ? '<span class="status-pill status-running">OK</span>' : '<span class="status-pill status-suspended">Error</span>'}
         ${r.message ? `<div class="muted" style="font-size:0.76rem;max-width:220px">${e(r.message)}</div>` : ''}
       </td>
@@ -865,7 +865,7 @@ app.get('/log', requireLogin, async (req, res) => {
 <div class="page-title"><div><h1>Run Log</h1><p>Last 200 actions — scheduled and manual, including who or what triggered each one.</p></div></div>
 <div class="card">
   ${!rows.length ? '<p class="empty-state">No activity yet.</p>' :
-    `<table><thead><tr><th>When</th><th>Zone</th><th>Action</th><th>Source</th><th>Triggered by</th><th>Result</th></tr></thead><tbody>${rowsHtml}</tbody></table>`}
+    `<table class="responsive"><thead><tr><th>When</th><th>Zone</th><th>Action</th><th>Source</th><th>Triggered by</th><th>Result</th></tr></thead><tbody>${rowsHtml}</tbody></table>`}
 </div>` + footer();
   res.send(html);
 });
