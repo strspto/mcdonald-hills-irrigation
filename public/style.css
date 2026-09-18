@@ -98,31 +98,61 @@ a { color: var(--green-700); }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
-  gap: 0.9rem;
+  /* Mobile-first: a fixed 3-across grid so a long zone list scrolls in
+     rows instead of one full-width card per zone (which used to mean
+     scrolling almost the whole list just to get past a handful of
+     holes). Widens back out to the flexible card-width layout once
+     there's room for it. */
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+}
+@media (min-width: 640px) {
+  .grid {
+    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: 0.9rem;
+  }
 }
 
 .zone-card {
   border: 1px solid #e4ded0;
   border-radius: var(--radius);
-  padding: 0.9rem;
+  padding: 0.55rem 0.5rem;
   background: var(--white);
 }
-.zone-card h3 { margin: 0 0 0.15rem; font-size: 1rem; }
-.zone-card .zone-num { color: var(--muted); font-size: 0.78rem; }
+.zone-card h3 { margin: 0 0 0.15rem; font-size: 0.85rem; line-height: 1.2; }
+.zone-card .zone-num { color: var(--muted); font-size: 0.7rem; }
+@media (min-width: 640px) {
+  .zone-card { padding: 0.9rem; }
+  .zone-card h3 { font-size: 1rem; }
+  .zone-card .zone-num { font-size: 0.78rem; }
+}
 
 .status-pill {
-  display: inline-flex; align-items:center; gap:0.35rem;
-  font-size: 0.76rem; font-weight: 600; padding: 0.2rem 0.55rem; border-radius: 999px;
-  margin: 0.5rem 0;
+  display: inline-flex; align-items:center; gap:0.3rem;
+  font-size: 0.68rem; font-weight: 600; padding: 0.15rem 0.4rem; border-radius: 999px;
+  margin: 0.35rem 0;
 }
 .status-idle { background: #eef0ea; color: var(--muted); }
 .status-running { background: #e2f4e8; color: var(--green-700); }
 .status-suspended { background: #fdeee9; color: var(--red); }
 
-.status-pill::before { content: ""; width:7px; height:7px; border-radius:50%; background: currentColor; }
+.status-pill::before { content: ""; width:6px; height:6px; border-radius:50%; background: currentColor; flex-shrink:0; }
 
-.zone-actions { display:flex; gap:0.4rem; margin-top:0.6rem; flex-wrap: wrap; }
+@media (min-width: 640px) {
+  .status-pill { font-size: 0.76rem; padding: 0.2rem 0.55rem; margin: 0.5rem 0; }
+  .status-pill::before { width:7px; height:7px; }
+}
+
+.zone-actions { display:flex; flex-direction: column; gap:0.3rem; margin-top:0.5rem; }
+.zone-actions form { width: 100%; }
+.zone-actions input[type=number] { width: 100% !important; }
+.zone-actions button { width: 100%; }
+@media (min-width: 640px) {
+  .zone-actions { flex-direction: row; flex-wrap: wrap; gap:0.4rem; margin-top:0.6rem; }
+  .zone-actions form { width: auto; display:flex; gap:0.3rem; align-items:center; }
+  .zone-actions input[type=number] { width: 4.2rem !important; }
+  .zone-actions button { width: auto; }
+}
 
 button, .btn {
   font: inherit;
