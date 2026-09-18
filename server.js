@@ -185,6 +185,20 @@ app.post('/account', requireLogin, requireCsrf, async (req, res) => {
   res.redirect('/dashboard');
 });
 
+// Lightweight JSON status feed the dashboard/manual pages poll on an
+// interval (see footer()'s script) so zone status updates live in place
+// instead of requiring a manual pull-to-refresh/reload.
+app.get('/api/zone-status', requireLogin, async (req, res) => {
+  const { rows: zones } = await query('SELECT * FROM zones ORDER BY number');
+  const hc = await HydrawiseClient.create();
+  const out = [];
+  for (const z of zones) {
+    const status = await hc.zoneStatus(z);
+    out.push({ id: z.id, state: status.state, detail: status.detail || null, endsAt: status.endsAt || null });
+  }
+  res.json({ zones: out });
+});
+
 // ---------------------------------------------------------------- dashboard
 
 app.get('/dashboard', requireLogin, async (req, res) => {
@@ -230,11 +244,11 @@ app.get('/dashboard', requireLogin, async (req, res) => {
   for (const z of zones) {
     const status = await hc.zoneStatus(z);
     zoneCards += `
-    <div class="zone-card">
+    <div class="zone-card" data-zone-id="${z.id}">
       <div class="zone-num">Zone ${z.number}</div>
       <h3>${e(z.name)}</h3>
-      <span class="status-pill status-${status.state}">${status.state[0].toUpperCase() + status.state.slice(1)}</span>
-      ${status.state === 'running' && status.endsAt ? `<div class="muted countdown" style="font-size:0.8rem" data-ends-at="${status.endsAt}"></div>` : (status.detail ? `<div class="muted" style="font-size:0.8rem">${e(status.detail)}</div>` : '')}
+      <span class="status-pill status-${status.state} js-status-pill">${status.state[0].toUpperCase() + status.state.slice(1)}</span>
+      <div class="muted js-status-detail countdown" style="font-size:0.8rem" data-ends-at="${status.endsAt || ''}">${status.state === 'running' && status.endsAt ? '' : e(status.detail || '')}</div>
       ${!z.enabled ? '<div class="muted" style="font-size:0.78rem">Disabled</div>' : ''}
     </div>`;
   }
@@ -338,11 +352,11 @@ async function manualPage(req) {
   for (const z of zones) {
     const status = await hc.zoneStatus(z);
     zoneCards += `
-    <div class="zone-card">
+    <div class="zone-card" data-zone-id="${z.id}">
       <div class="zone-num">Zone ${z.number}</div>
       <h3>${e(z.name)}</h3>
-      <span class="status-pill status-${status.state}">${status.state[0].toUpperCase() + status.state.slice(1)}</span>
-      ${status.state === 'running' && status.endsAt ? `<div class="muted countdown" style="font-size:0.8rem" data-ends-at="${status.endsAt}"></div>` : (status.detail ? `<div class="muted" style="font-size:0.8rem">${e(status.detail)}</div>` : '')}
+      <span class="status-pill status-${status.state} js-status-pill">${status.state[0].toUpperCase() + status.state.slice(1)}</span>
+      <div class="muted js-status-detail countdown" style="font-size:0.8rem" data-ends-at="${status.endsAt || ''}">${status.state === 'running' && status.endsAt ? '' : e(status.detail || '')}</div>
       <div class="zone-actions">
         <form method="post" action="/manual" style="display:flex;gap:0.3rem;align-items:center">
           ${csrfField(req)}
@@ -894,23 +908,48 @@ const SEQUENTIAL_STOP_SPACING_MS = 35000; // 35s -> ~8.5 requests per 5 min
  * different zone each time, depending on when a restart happened to land).
  * The once-a-minute scheduler tick sweeps this queue, so a queued zone
  * fires on schedule even if the process that queued it is long gone.
+ *
+ * IMPORTANT: only the NEXT zone is ever queued at a time (with the rest
+ * carried along as `remaining_runs`). Each zone after that gets queued by
+ * runDuePendingZones(), at the moment the zone before it actually fires,
+ * relative to THAT real clock time — never off one fixed plan computed
+ * up front. Zones used to be pre-scheduled all at once, as one fixed list
+ * of absolute timestamps computed off a single Date.now() snapshot at the
+ * very start. Any real-world delay along the way (the scheduler only
+ * ticks about once a minute, so a zone can start a minute or two late) was
+ * never absorbed — it just accumulated, zone after zone, silently. On a
+ * long program that eventually adds up to more than one zone's length,
+ * so a later zone's already-fixed start command fires WHILE the zone
+ * before it is still actually running — and since these zones share one
+ * water line, starting the next one immediately cuts the current one off
+ * early. Chaining off the real fire time, one zone at a time, is what
+ * keeps the whole sequence self-correcting instead of drifting.
  */
 async function dispatchSequentialRuns(runs, hc, triggeredBy, programId) {
-  let cumulativeDelayMs = 0;
-  for (let i = 0; i < runs.length; i++) {
-    const { zone, minutes } = runs[i];
-    if (i === 0) {
-      await hc.runZone(zone, minutes, triggeredBy, programId);
-    } else {
-      const fireAt = new Date(Date.now() + cumulativeDelayMs);
-      await query(
-        `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at)
-         VALUES ($1,$2,'run',$3,$4,$5)`,
-        [zone.id, programId, minutes, triggeredBy, fireAt]
-      );
-    }
-    cumulativeDelayMs += minutes * 60000;
-  }
+  if (!runs.length) return;
+  const [first, ...rest] = runs;
+  await hc.runZone(first.zone, first.minutes, triggeredBy, programId);
+  await queueNextRun(rest, first.minutes, hc, triggeredBy, programId);
+}
+
+/**
+ * Queues the next run in a sequence to fire `afterMinutes` from RIGHT NOW
+ * — i.e. from whenever the zone currently starting actually began — not
+ * from any earlier fixed point in time. This is the piece that makes the
+ * sequence self-correcting: if an earlier zone started a little late, the
+ * zone after it inherits that same real start time instead of drifting
+ * further out of sync with what's actually running on the controller.
+ */
+async function queueNextRun(remainingRuns, afterMinutes, hc, triggeredBy, programId) {
+  if (!remainingRuns.length) return;
+  const [next, ...rest] = remainingRuns;
+  const fireAt = new Date(Date.now() + afterMinutes * 60000);
+  const remainingForDb = rest.map((r) => ({ zone_id: r.zone.id, minutes: r.minutes }));
+  await query(
+    `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at, remaining_runs)
+     VALUES ($1,$2,'run',$3,$4,$5,$6)`,
+    [next.zone.id, programId, next.minutes, triggeredBy, fireAt, JSON.stringify(remainingForDb)]
+  );
 }
 
 /** Same idea as dispatchSequentialRuns, but for Stop — no natural duration to space by, so a fixed safe interval is used instead. Also DB-queued for the same restart-safety reason. */
@@ -945,6 +984,19 @@ async function runDuePendingZones(hc) {
       }
       if (row.action === 'run') {
         await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id);
+        // Chain the NEXT zone off this zone's actual fire time (right
+        // now), not off any earlier fixed schedule — see the comment on
+        // queueNextRun() above for why that matters.
+        const remaining = row.remaining_runs || [];
+        if (remaining.length) {
+          const zoneIds = remaining.map((r) => r.zone_id);
+          const { rows: zoneObjs } = await query('SELECT * FROM zones WHERE id = ANY($1)', [zoneIds]);
+          const byId = new Map(zoneObjs.map((z) => [z.id, z]));
+          const restRuns = remaining
+            .map((r) => ({ zone: byId.get(r.zone_id), minutes: r.minutes }))
+            .filter((r) => r.zone); // drop any zone removed since this was queued
+          await queueNextRun(restRuns, row.minutes, hc, row.triggered_by, row.program_id);
+        }
       } else {
         await hc.stopZone(zone, row.triggered_by);
       }
