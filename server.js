@@ -1130,6 +1130,33 @@ async function isSequenceBusy() {
 }
 
 /** Starts every zone in a program (used by the scheduler and by "Run Now"). */
+/**
+ * True if some zone is still within its watering window right now — i.e.
+ * the most recent 'run' log entry hasn't finished yet (its start time +
+ * duration is still in the future). This is the guard that was missing:
+ * nothing previously stopped a second sequence (a manual Run Now/Run All,
+ * or the scheduler) from starting while an earlier one was still
+ * mid-flight. Two independent chains both targeting the same single-
+ * zone-at-a-time controller then fight each other — each new command
+ * preempts whatever the other chain currently has running, which looks
+ * like zones firing "out of order" and getting cut short partway through
+ * (e.g. a scheduled run and a manual Run Now on the same program
+ * overlapping). Checking the actual run_log rather than pending_zone_runs
+ * matters because pending_zone_runs is briefly EMPTY during a chain's
+ * very last zone (there's nothing left to queue), which would otherwise
+ * make the system look "free" right when it's most definitely not.
+ */
+async function isSequenceBusy() {
+  const { rows } = await query(
+    `SELECT ts, duration_minutes FROM run_log
+     WHERE action = 'run' AND zone_id IS NOT NULL AND duration_minutes IS NOT NULL
+     ORDER BY ts DESC LIMIT 1`
+  );
+  if (!rows.length) return false;
+  const finishesAt = new Date(rows[0].ts).getTime() + rows[0].duration_minutes * 60000;
+  return finishesAt > Date.now();
+}
+
 async function runProgramZones(program, hc, triggeredBy) {
   const { rows: zoneRows } = await query(
     `SELECT z.*, pz.duration_minutes FROM program_zones pz JOIN zones z ON z.id = pz.zone_id
