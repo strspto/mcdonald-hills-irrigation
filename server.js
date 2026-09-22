@@ -294,6 +294,10 @@ app.post('/manual', requireLogin, requireCsrf, async (req, res) => {
     const minutes = Math.max(1, parseInt(req.body.minutes, 10) || 10);
 
     if (action === 'runall') {
+      if (await isSequenceBusy()) {
+        flash(req, 'error', "Can't start Run All yet — another watering sequence is still running. Wait for it to finish, or use Stop All first.");
+        return res.redirect('/manual');
+      }
       // Zones water ONE AT A TIME, in sequence — see the comment on
       // runProgramZones() below for why (shared water pressure, and
       // Hydrawise's real rate limit). "Run All" starts zone 1 now,
@@ -502,6 +506,10 @@ app.post('/programs/:id/run', requireLogin, requireCsrf, async (req, res) => {
     return res.redirect('/programs');
   }
   const hc = await HydrawiseClient.create();
+  if (await isSequenceBusy()) {
+    flash(req, 'error', `Can't start "${program.name}" yet — another watering sequence is still running. Wait for it to finish, or use Stop All in Manual Control.`);
+    return res.redirect('/programs');
+  }
   const count = await runProgramZones(program, hc, actorLabel(req));
   if (count === 0) {
     flash(req, 'error', `"${program.name}" has no zones configured yet.`);
@@ -1011,6 +1019,33 @@ async function runDuePendingZones(hc) {
 }
 
 /** Starts every zone in a program (used by the scheduler and by "Run Now"). */
+/**
+ * True if some zone is still within its watering window right now — i.e.
+ * the most recent 'run' log entry hasn't finished yet (its start time +
+ * duration is still in the future). This is the guard that was missing:
+ * nothing previously stopped a second sequence (a manual Run Now/Run All,
+ * or the scheduler) from starting while an earlier one was still
+ * mid-flight. Two independent chains both targeting the same single-
+ * zone-at-a-time controller then fight each other — each new command
+ * preempts whatever the other chain currently has running, which looks
+ * like zones firing "out of order" and getting cut short partway through
+ * (e.g. a scheduled run and a manual Run Now on the same program
+ * overlapping). Checking the actual run_log rather than pending_zone_runs
+ * matters because pending_zone_runs is briefly EMPTY during a chain's
+ * very last zone (there's nothing left to queue), which would otherwise
+ * make the system look "free" right when it's most definitely not.
+ */
+async function isSequenceBusy() {
+  const { rows } = await query(
+    `SELECT ts, duration_minutes FROM run_log
+     WHERE action = 'run' AND zone_id IS NOT NULL AND duration_minutes IS NOT NULL
+     ORDER BY ts DESC LIMIT 1`
+  );
+  if (!rows.length) return false;
+  const finishesAt = new Date(rows[0].ts).getTime() + rows[0].duration_minutes * 60000;
+  return finishesAt > Date.now();
+}
+
 async function runProgramZones(program, hc, triggeredBy) {
   const { rows: zoneRows } = await query(
     `SELECT z.*, pz.duration_minutes FROM program_zones pz JOIN zones z ON z.id = pz.zone_id
@@ -1060,6 +1095,15 @@ async function schedulerTick() {
         [p.id, todayDate]
       );
       if (already[0].c > 0) continue;
+
+      // Don't start this program's sequence on top of one that's still
+      // running (e.g. someone hit Run Now on it manually a few minutes
+      // before its scheduled time) — skip this tick and try again next
+      // minute rather than colliding with it.
+      if (await isSequenceBusy()) {
+        console.log(`[scheduler] Delaying "${p.name}" — another sequence is still running.`);
+        continue;
+      }
 
       const count = await runProgramZones(p, hc, 'scheduler');
       console.log(`[scheduler] Ran program "${p.name}" (${count} zones)`);
