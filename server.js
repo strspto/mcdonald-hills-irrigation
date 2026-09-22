@@ -917,7 +917,18 @@ app.get('/healthz', (req, res) => res.send('ok'));
 // so that even the largest realistic zone count (24) firing back-to-back
 // at this interval stays comfortably under Hydrawise's real limit of 10
 // requests per 5-minute window.
-const SEQUENTIAL_STOP_SPACING_MS = 35000; // 35s -> ~8.5 requests per 5 min
+// A fixed spacing (in ms) used only for actions with no natural "how long
+// does this zone run" duration to space by (currently: bulk Stop). This
+// used to be 35s, which works out to ~8.5 requests per 5 minutes from
+// Stop All ALONE — leaving almost no headroom for anything else hitting
+// the same real Hydrawise account limit (10 requests/5min) at the same
+// time: the live-status polling this app itself does, or a manual
+// Run/Resume/Stop click made while a Stop All is still draining. That
+// gap is exactly what caused a real rate-limit storm — not just our own
+// internal throttle, but genuine "Exceeded maximum number of requests"
+// errors straight from Hydrawise. 50s leaves real margin (~6/5min from
+// Stop All) for that other traffic to coexist safely.
+const SEQUENTIAL_STOP_SPACING_MS = 50000; // 50s -> ~6 requests per 5 min, leaving headroom
 
 /**
  * Fires a list of { zone, minutes } run commands ONE AT A TIME: the first
@@ -1083,7 +1094,21 @@ async function runDuePendingZones(hc) {
           .filter((r) => r.zone); // drop any zone removed since this was queued
         await queueNextRun(restRuns, row.minutes, hc, row.triggered_by, row.program_id, zone.id);
       } else {
-        await hc.stopZone(zone, row.triggered_by);
+        // Same rate-limit-retry logic as the 'run' branch above — this
+        // was MISSING here, which is exactly what silently dropped
+        // several zones' stop commands during tonight's rate-limit
+        // storm: a throttled stop just logged an error and was gone for
+        // good, with nothing to ever try it again. A zone whose stop
+        // never lands stays physically running indefinitely.
+        const result = await hc.stopZone(zone, row.triggered_by);
+        if (!result.ok && /exceeded maximum|internal throttle/i.test(result.message || '')) {
+          console.log(`[pending run] stop for zone ${zone.id} hit the rate limit — retrying in 90s instead of dropping it.`);
+          await query(
+            `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at)
+             VALUES ($1,$2,'stop',NULL,$3,$4)`,
+            [zone.id, row.program_id, row.triggered_by, new Date(Date.now() + 90000)]
+          );
+        }
       }
     } catch (err) {
       console.error(`[pending run] failed for zone ${row.zone_id} (action=${row.action}):`, err);
