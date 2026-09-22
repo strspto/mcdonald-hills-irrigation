@@ -807,6 +807,7 @@ app.post('/users', requireAdmin, requireCsrf, async (req, res) => {
 app.get('/settings', requireAdmin, async (req, res) => {
   const apiKey = await getSetting('hydrawise_api_key', '');
   const serial = await getSetting('controller_serial', '');
+  const controllerId = await getSetting('hydrawise_controller_id', '');
   const mock = (await getSetting('mock_mode', '1')) === '1';
 
   let html = await header(req, { title: 'Settings', activeNav: 'settings' });
@@ -819,11 +820,42 @@ app.get('/settings', requireAdmin, async (req, res) => {
     ${csrfField(req)}
     <div class="form-row"><label>Hydrawise API key</label><input type="text" name="hydrawise_api_key" value="${e(apiKey)}" placeholder="paste key here once you have account access"></div>
     <div class="form-row"><label>Controller serial number (optional)</label><input type="text" name="controller_serial" value="${e(serial)}" placeholder="found on the PHC-2400 unit / Hydrawise app"></div>
+    <div class="form-row">
+      <label>Hydrawise Controller ID ${controllerId ? '' : '<span style="color:var(--flag)">(recommended now that your account has more than one controller)</span>'}</label>
+      <input type="text" name="hydrawise_controller_id" value="${e(controllerId)}" placeholder="e.g. 123456 — see 'List Hydrawise controllers' below">
+      <p class="muted" style="font-size:0.8rem;margin:0.3rem 0 0">This is Hydrawise's internal cloud ID for YOUR real "MHGC" controller — different from the serial number above. With more than one controller on the account, leaving this blank means Hydrawise decides which one to talk to on its own, which can silently pick the wrong one.</p>
+    </div>
     <div class="form-row"><label><input type="checkbox" name="force_demo" style="width:auto" ${mock && apiKey ? 'checked' : ''}> Keep demo mode on even with a key saved (for testing)</label></div>
     <button type="submit">Save</button>
   </form>
   <p style="margin-top:1rem">Current mode: <strong>${mock ? 'Demo (simulated)' : 'Live (real controller)'}</strong></p>
+  ${apiKey ? `<p style="margin-top:0.5rem"><a href="/settings/hydrawise-controllers">List Hydrawise controllers (find the right ID)</a></p>` : ''}
   ${apiKey ? `<p style="margin-top:0.5rem"><a href="/settings/hydrawise-debug">View raw Hydrawise status data (debug)</a></p>` : ''}
+</div>` + footer();
+  res.send(html);
+});
+
+app.get('/settings/hydrawise-controllers', requireAdmin, async (req, res) => {
+  const hc = await HydrawiseClient.create();
+  const result = await hc.listControllers();
+
+  let pretty;
+  if (result.error) {
+    pretty = 'Error: ' + result.error;
+  } else {
+    try {
+      pretty = JSON.stringify(JSON.parse(result.raw), null, 2);
+    } catch (e) {
+      pretty = 'Response was not valid JSON. Raw response below:\n\n' + result.raw;
+    }
+  }
+
+  let html = await header(req, { title: 'Hydrawise Controllers', activeNav: 'settings' });
+  html += `
+<div class="page-title"><div><h1>Hydrawise Controllers</h1><p>Every controller on this Hydrawise account, straight from their API. Find the entry for your real "MHGC" controller (the one with 24 real zones and history — not an empty duplicate, and not the still-pending second unit), copy its <code>controller_id</code>, and paste it into the "Hydrawise Controller ID" field in Settings.</p></div></div>
+<div class="card">
+  <pre style="white-space:pre-wrap;word-break:break-word;font-size:0.78rem;background:#f5f5f0;padding:1rem;border-radius:6px;max-height:70vh;overflow:auto">${e(pretty)}</pre>
+  <p style="margin-top:1rem"><a href="/settings">← Back to Settings</a></p>
 </div>` + footer();
   res.send(html);
 });
@@ -857,10 +889,12 @@ app.get('/settings/hydrawise-debug', requireAdmin, async (req, res) => {
 app.post('/settings', requireAdmin, requireCsrf, async (req, res) => {
   const apiKey = (req.body.hydrawise_api_key || '').trim();
   const serial = (req.body.controller_serial || '').trim();
+  const controllerId = (req.body.hydrawise_controller_id || '').trim();
   const forceDemo = !!req.body.force_demo;
 
   await setSetting('hydrawise_api_key', apiKey);
   await setSetting('controller_serial', serial);
+  await setSetting('hydrawise_controller_id', controllerId);
   await setSetting('mock_mode', apiKey && !forceDemo ? '0' : '1');
 
   flash(req, 'success', apiKey && !forceDemo ? 'Live mode enabled — actions now go to the real Hydrawise API.' : 'Settings saved. Still in demo mode.');
