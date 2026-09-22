@@ -89,13 +89,16 @@ async function loginPage(req, error) {
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Log in · McDonald Hills GC Irrigation Scheduler</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/style.css">
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#1f5c37">
+<meta name="theme-color" content="#17332a">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -185,6 +188,20 @@ app.post('/account', requireLogin, requireCsrf, async (req, res) => {
   res.redirect('/dashboard');
 });
 
+// Lightweight JSON status feed the dashboard/manual pages poll on an
+// interval (see footer()'s script) so zone status updates live in place
+// instead of requiring a manual pull-to-refresh/reload.
+app.get('/api/zone-status', requireLogin, async (req, res) => {
+  const { rows: zones } = await query('SELECT * FROM zones ORDER BY number');
+  const hc = await HydrawiseClient.create();
+  const out = [];
+  for (const z of zones) {
+    const status = await hc.zoneStatus(z);
+    out.push({ id: z.id, state: status.state, detail: status.detail || null, endsAt: status.endsAt || null });
+  }
+  res.json({ zones: out });
+});
+
 // ---------------------------------------------------------------- dashboard
 
 app.get('/dashboard', requireLogin, async (req, res) => {
@@ -223,18 +240,18 @@ app.get('/dashboard', requireLogin, async (req, res) => {
       [row.program.id]
     );
     const names = zr.map((r) => r.name).join(', ') || '—';
-    upcomingRows += `<tr><td>${e(fmtDayTime(row.ts))}</td><td>${e(row.program.name)}</td><td class="muted">${e(names)}</td></tr>`;
+    upcomingRows += `<tr><td data-label="When">${e(fmtDayTime(row.ts))}</td><td data-label="Program">${e(row.program.name)}</td><td data-label="Zones" class="muted">${e(names)}</td></tr>`;
   }
 
   let zoneCards = '';
   for (const z of zones) {
     const status = await hc.zoneStatus(z);
     zoneCards += `
-    <div class="zone-card">
+    <div class="zone-card" data-zone-id="${z.id}">
       <div class="zone-num">Zone ${z.number}</div>
       <h3>${e(z.name)}</h3>
-      <span class="status-pill status-${status.state}">${status.state[0].toUpperCase() + status.state.slice(1)}</span>
-      ${status.state === 'running' && status.endsAt ? `<div class="muted countdown" style="font-size:0.8rem" data-ends-at="${status.endsAt}"></div>` : (status.detail ? `<div class="muted" style="font-size:0.8rem">${e(status.detail)}</div>` : '')}
+      <span class="status-pill status-${status.state} js-status-pill">${status.state[0].toUpperCase() + status.state.slice(1)}</span>
+      <div class="muted js-status-detail countdown" style="font-size:0.8rem" data-ends-at="${status.endsAt || ''}">${status.state === 'running' && status.endsAt ? '' : e(status.detail || '')}</div>
       ${!z.enabled ? '<div class="muted" style="font-size:0.78rem">Disabled</div>' : ''}
     </div>`;
   }
@@ -253,7 +270,7 @@ ${quickRunHtml}
   <h2 style="margin-top:0;font-size:1rem">Upcoming scheduled runs</h2>
   ${!upcoming.length
     ? `<p class="empty-state">No upcoming runs. ${u.role === 'admin' ? '<a href="/programs">Create a program</a> to get started.' : 'Ask an admin to set up a watering program.'}</p>`
-    : `<table><thead><tr><th>When</th><th>Program</th><th>Zones</th></tr></thead><tbody>${upcomingRows}</tbody></table>`}
+    : `<table class="responsive"><thead><tr><th>When</th><th>Program</th><th>Zones</th></tr></thead><tbody>${upcomingRows}</tbody></table>`}
 </div>
 <h2 style="font-size:1rem">Zones</h2>
 <div class="grid">${zoneCards}</div>` + footer();
@@ -277,12 +294,33 @@ app.post('/manual', requireLogin, requireCsrf, async (req, res) => {
     const minutes = Math.max(1, parseInt(req.body.minutes, 10) || 10);
 
     if (action === 'runall') {
+      if (await isSequenceBusy()) {
+        flash(req, 'error', "Can't start Run All yet — another watering sequence is still running. Wait for it to finish, or use Stop All first.");
+        return res.redirect('/manual');
+      }
       // Zones water ONE AT A TIME, in sequence — see the comment on
       // runProgramZones() below for why (shared water pressure, and
       // Hydrawise's real rate limit). "Run All" starts zone 1 now,
       // zone 2 once zone 1's `minutes` have elapsed, and so on.
       dispatchSequentialRuns(zones.map((z) => ({ zone: z, minutes })), hc, actor, null);
     } else {
+      // Stop All used to have NO guard against being clicked more than
+      // once — every click queued a full stop-sequence (one command per
+      // enabled zone, 35s apart) with nothing stopping several of those
+      // sequences from piling up on top of each other. Six Stop All
+      // clicks in under a minute once queued 100+ stop commands into the
+      // same few minutes, which instantly blew through Hydrawise's real
+      // limit of 10 requests per 5 minutes — and once THAT happened,
+      // every other request (including legitimate scheduled Greens/
+      // Morning runs) started failing with the same rate-limit error too,
+      // for the better part of 20 minutes. This is almost certainly what
+      // actually happened to zones that appeared to silently skip earlier
+      // — their Run command hit this same rate limit and errored out
+      // before ever reaching the relay.
+      if (await hasPendingStops()) {
+        flash(req, 'error', 'Already stopping zones — give it a minute rather than clicking Stop All again (repeated clicks queue duplicate stop commands and can trip Hydrawise\'s rate limit).');
+        return res.redirect('/manual');
+      }
       // Stop has no natural "duration" to space by, but the same rate
       // limit still applies — space stops out safely instead of firing
       // all of them in the same instant.
@@ -333,16 +371,18 @@ app.post('/manual', requireLogin, requireCsrf, async (req, res) => {
 async function manualPage(req) {
   const { rows: zones } = await query('SELECT * FROM zones ORDER BY number');
   const hc = await HydrawiseClient.create();
+  const busy = await isSequenceBusy();
+  const stopping = await hasPendingStops();
 
   let zoneCards = '';
   for (const z of zones) {
     const status = await hc.zoneStatus(z);
     zoneCards += `
-    <div class="zone-card">
+    <div class="zone-card" data-zone-id="${z.id}">
       <div class="zone-num">Zone ${z.number}</div>
       <h3>${e(z.name)}</h3>
-      <span class="status-pill status-${status.state}">${status.state[0].toUpperCase() + status.state.slice(1)}</span>
-      ${status.state === 'running' && status.endsAt ? `<div class="muted countdown" style="font-size:0.8rem" data-ends-at="${status.endsAt}"></div>` : (status.detail ? `<div class="muted" style="font-size:0.8rem">${e(status.detail)}</div>` : '')}
+      <span class="status-pill status-${status.state} js-status-pill">${status.state[0].toUpperCase() + status.state.slice(1)}</span>
+      <div class="muted js-status-detail countdown" style="font-size:0.8rem" data-ends-at="${status.endsAt || ''}">${status.state === 'running' && status.endsAt ? '' : e(status.detail || '')}</div>
       <div class="zone-actions">
         <form method="post" action="/manual" style="display:flex;gap:0.3rem;align-items:center">
           ${csrfField(req)}
@@ -376,6 +416,7 @@ async function manualPage(req) {
 <div class="page-title">
   <div><h1>Manual Control</h1><p>Start, stop, or suspend any zone right now — useful for spot-watering or working around a program.</p></div>
 </div>
+${busy || stopping ? `<div class="flash" style="background:var(--green-100);color:var(--green-700)">${stopping ? 'Stop All is still working through its zone list — clicking it again will queue duplicate stop commands instead of speeding anything up.' : 'A watering sequence is currently running — Run Now/Run All will be blocked until it finishes, to avoid two sequences colliding.'}</div>` : ''}
 <div class="card">
   <h2 style="margin-top:0;font-size:1rem">All zones</h2>
   <form method="post" action="/manual" style="display:flex;gap:0.6rem;align-items:end;flex-wrap:wrap">
@@ -485,6 +526,10 @@ app.post('/programs/:id/run', requireLogin, requireCsrf, async (req, res) => {
     return res.redirect('/programs');
   }
   const hc = await HydrawiseClient.create();
+  if (await isSequenceBusy()) {
+    flash(req, 'error', `Can't start "${program.name}" yet — another watering sequence is still running. Wait for it to finish, or use Stop All in Manual Control.`);
+    return res.redirect('/programs');
+  }
   const count = await runProgramZones(program, hc, actorLabel(req));
   if (count === 0) {
     flash(req, 'error', `"${program.name}" has no zones configured yet.`);
@@ -583,14 +628,14 @@ async function programsPage(req) {
     );
     const zoneSummary = zr.rows.map((r) => `Z${r.number} (${r.duration_minutes}m)`).join(', ') || '—';
     const scheduleCells = p.program_type === 'on_demand'
-      ? `<td colspan="2" class="muted">On demand</td>`
-      : `<td>${e(fmtTime(DateTime.fromFormat(p.start_time, 'HH:mm', { zone: TZ }).toMillis()))}</td><td class="muted">${e(daysMaskToLabels(p.days_mask))}</td>`;
+      ? `<td data-label="Schedule" colspan="2" class="muted">On demand</td>`
+      : `<td data-label="Start">${e(fmtTime(DateTime.fromFormat(p.start_time, 'HH:mm', { zone: TZ }).toMillis()))}</td><td data-label="Days" class="muted">${e(daysMaskToLabels(p.days_mask))}</td>`;
     listRows += `
     <tr>
-      <td>${e(p.name)}</td>
+      <td data-label="Name">${e(p.name)}</td>
       ${scheduleCells}
-      <td class="muted">${e(zoneSummary)}</td>
-      <td>${p.enabled ? 'Enabled' : '<span class="muted">Disabled</span>'}</td>
+      <td data-label="Zones" class="muted">${e(zoneSummary)}</td>
+      <td data-label="Status">${p.enabled ? 'Enabled' : '<span class="muted">Disabled</span>'}</td>
       <td class="right">
         ${p.enabled ? `
         <form method="post" action="/programs/${p.id}/run" style="display:inline">
@@ -617,7 +662,7 @@ ${editFormHtml}
 <div class="card">
   ${!programs.length
     ? `<p class="empty-state">No programs yet. ${isAdmin ? '<a href="/programs?new=1">Create your first program</a>.' : 'Ask an admin to set one up.'}</p>`
-    : `<table><thead><tr><th>Name</th><th>Start</th><th>Days</th><th>Zones</th><th>Status</th><th></th></tr></thead><tbody>${listRows}</tbody></table>`}
+    : `<table class="responsive"><thead><tr><th>Name</th><th>Start</th><th>Days</th><th>Zones</th><th>Status</th><th></th></tr></thead><tbody>${listRows}</tbody></table>`}
 </div>` + footer();
   return html;
 }
@@ -628,10 +673,10 @@ app.get('/zones', requireAdmin, async (req, res) => {
   const { rows: zones } = await query('SELECT * FROM zones ORDER BY number');
   const rows = zones.map((z) => `
     <tr>
-      <td>#${z.number}<input type="hidden" name="id[]" value="${z.id}"></td>
-      <td><input type="text" name="name[]" value="${e(z.name)}"></td>
-      <td><input type="text" name="relay[]" value="${e(z.hydrawise_relay_id || '')}" placeholder="(optional)"></td>
-      <td><input type="checkbox" name="enabled[]" value="${z.id}" ${z.enabled ? 'checked' : ''}></td>
+      <td data-label="Station">#${z.number}<input type="hidden" name="id[]" value="${z.id}"></td>
+      <td data-label="Name"><input type="text" name="name[]" value="${e(z.name)}"></td>
+      <td data-label="Relay ID"><input type="text" name="relay[]" value="${e(z.hydrawise_relay_id || '')}" placeholder="(optional)"></td>
+      <td data-label="Enabled"><input type="checkbox" name="enabled[]" value="${z.id}" ${z.enabled ? 'checked' : ''}></td>
     </tr>`).join('');
 
   let html = await header(req, { title: 'Zones', activeNav: 'zones' });
@@ -640,7 +685,7 @@ app.get('/zones', requireAdmin, async (req, res) => {
 <div class="card">
   <form method="post" action="/zones">
     ${csrfField(req)}
-    <table><thead><tr><th style="width:4rem">Station</th><th>Name</th><th style="width:10rem">Hydrawise Relay ID</th><th style="width:5rem">Enabled</th></tr></thead><tbody>${rows}</tbody></table>
+    <table class="responsive"><thead><tr><th style="width:4rem">Station</th><th>Name</th><th style="width:10rem">Hydrawise Relay ID</th><th style="width:5rem">Enabled</th></tr></thead><tbody>${rows}</tbody></table>
     <div style="margin-top:1rem"><button type="submit">Save Zones</button></div>
   </form>
 </div>` + footer();
@@ -674,9 +719,9 @@ app.get('/users', requireAdmin, async (req, res) => {
   const { rows: users } = await query('SELECT * FROM users ORDER BY role, username');
   const rows = users.map((row) => `
     <tr>
-      <td>${e(row.full_name)}${row.must_change_password ? ' <span class="muted" style="font-size:0.78rem">(must set password)</span>' : ''}</td>
-      <td>${e(row.username)}</td>
-      <td><span class="badge-role">${e(row.role)}</span></td>
+      <td data-label="Name">${e(row.full_name)}${row.must_change_password ? ' <span class="muted" style="font-size:0.78rem">(must set password)</span>' : ''}</td>
+      <td data-label="Username">${e(row.username)}</td>
+      <td data-label="Role"><span class="badge-role">${e(row.role)}</span></td>
       <td class="right">
         <form method="post" action="/users" style="display:inline">
           ${csrfField(req)}<input type="hidden" name="action" value="reset_password"><input type="hidden" name="id" value="${row.id}">
@@ -703,7 +748,7 @@ app.get('/users', requireAdmin, async (req, res) => {
     <button type="submit">Add User</button>
   </form>
 </div>
-<div class="card"><table><thead><tr><th>Name</th><th>Username</th><th>Role</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` + footer();
+<div class="card"><table class="responsive"><thead><tr><th>Name</th><th>Username</th><th>Role</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` + footer();
   res.send(html);
 });
 
@@ -835,12 +880,12 @@ app.get('/log', requireLogin, async (req, res) => {
 
   const rowsHtml = rows.map((r) => `
     <tr>
-      <td class="muted">${e(fmtLogTime(r.ts))}</td>
-      <td>${r.zone_name ? e(`Z${r.zone_number} ${r.zone_name}`) : '<span class="muted">all zones</span>'}</td>
-      <td>${e(r.action[0].toUpperCase() + r.action.slice(1))}${r.duration_minutes ? ` (${r.duration_minutes}m)` : ''}</td>
-      <td class="muted">${r.program_name ? e(r.program_name) : 'Manual'}</td>
-      <td class="muted">${e(r.triggered_by.startsWith('user:') ? r.triggered_by.split(':')[2] : r.triggered_by)}</td>
-      <td>
+      <td data-label="When" class="muted">${e(fmtLogTime(r.ts))}</td>
+      <td data-label="Zone">${r.zone_name ? e(`Z${r.zone_number} ${r.zone_name}`) : '<span class="muted">all zones</span>'}</td>
+      <td data-label="Action">${e(r.action[0].toUpperCase() + r.action.slice(1))}${r.duration_minutes ? ` (${r.duration_minutes}m)` : ''}</td>
+      <td data-label="Source" class="muted">${r.program_name ? e(r.program_name) : 'Manual'}</td>
+      <td data-label="Triggered by" class="muted">${e(r.triggered_by.startsWith('user:') ? r.triggered_by.split(':')[2] : r.triggered_by)}</td>
+      <td data-label="Result">
         ${r.status === 'success' ? '<span class="status-pill status-running">OK</span>' : '<span class="status-pill status-suspended">Error</span>'}
         ${r.message ? `<div class="muted" style="font-size:0.76rem;max-width:220px">${e(r.message)}</div>` : ''}
       </td>
@@ -851,7 +896,7 @@ app.get('/log', requireLogin, async (req, res) => {
 <div class="page-title"><div><h1>Run Log</h1><p>Last 200 actions — scheduled and manual, including who or what triggered each one.</p></div></div>
 <div class="card">
   ${!rows.length ? '<p class="empty-state">No activity yet.</p>' :
-    `<table><thead><tr><th>When</th><th>Zone</th><th>Action</th><th>Source</th><th>Triggered by</th><th>Result</th></tr></thead><tbody>${rowsHtml}</tbody></table>`}
+    `<table class="responsive"><thead><tr><th>When</th><th>Zone</th><th>Action</th><th>Source</th><th>Triggered by</th><th>Result</th></tr></thead><tbody>${rowsHtml}</tbody></table>`}
 </div>` + footer();
   res.send(html);
 });
@@ -894,23 +939,77 @@ const SEQUENTIAL_STOP_SPACING_MS = 35000; // 35s -> ~8.5 requests per 5 min
  * different zone each time, depending on when a restart happened to land).
  * The once-a-minute scheduler tick sweeps this queue, so a queued zone
  * fires on schedule even if the process that queued it is long gone.
+ *
+ * IMPORTANT: only the NEXT zone is ever queued at a time (with the rest
+ * carried along as `remaining_runs`). Each zone after that gets queued by
+ * runDuePendingZones(), at the moment the zone before it actually fires,
+ * relative to THAT real clock time — never off one fixed plan computed
+ * up front. Zones used to be pre-scheduled all at once, as one fixed list
+ * of absolute timestamps computed off a single Date.now() snapshot at the
+ * very start. Any real-world delay along the way (the scheduler only
+ * ticks about once a minute, so a zone can start a minute or two late) was
+ * never absorbed — it just accumulated, zone after zone, silently. On a
+ * long program that eventually adds up to more than one zone's length,
+ * so a later zone's already-fixed start command fires WHILE the zone
+ * before it is still actually running — and since these zones share one
+ * water line, starting the next one immediately cuts the current one off
+ * early. Chaining off the real fire time, one zone at a time, is what
+ * keeps the whole sequence self-correcting instead of drifting.
  */
 async function dispatchSequentialRuns(runs, hc, triggeredBy, programId) {
-  let cumulativeDelayMs = 0;
-  for (let i = 0; i < runs.length; i++) {
-    const { zone, minutes } = runs[i];
-    if (i === 0) {
-      await hc.runZone(zone, minutes, triggeredBy, programId);
-    } else {
-      const fireAt = new Date(Date.now() + cumulativeDelayMs);
+  if (!runs.length) return;
+  const [first, ...rest] = runs;
+  await hc.runZone(first.zone, first.minutes, triggeredBy, programId);
+  await queueNextRun(rest, first.minutes, hc, triggeredBy, programId, first.zone.id);
+}
+
+/**
+ * Queues the next step in a sequence to fire `afterMinutes` from RIGHT NOW
+ * — i.e. from whenever the zone currently running actually began — not
+ * from any earlier fixed point in time. This is the piece that makes the
+ * sequence self-correcting: if an earlier zone started a little late, the
+ * zone after it inherits that same real start time instead of drifting
+ * further out of sync with what's actually running on the controller.
+ *
+ * `currentZoneId` is the zone that's running RIGHT NOW and needs to be
+ * explicitly stopped at that same moment — either to make way for the
+ * next zone (queued with previous_zone_id set, so runDuePendingZones
+ * stops it immediately before starting the next one), or, if this is the
+ * last zone in the sequence, as its own queued 'stop' so the whole
+ * sequence ends precisely on our own clock rather than waiting on
+ * Hydrawise's own auto-stop timer. This pairing is what keeps a Master-
+ * Valve-driven pump running continuously through the whole sequence: the
+ * previous zone used to be left to expire on Hydrawise's OWN internal
+ * timer while the next zone's start was driven by OUR separate scheduler
+ * tick (which only checks in once every ~60s) — two independent clocks
+ * that don't agree, leaving a real window (up to that ~60s) where
+ * Hydrawise saw zero zones active and could drop the pump relay, then
+ * re-engage it for the next zone. Stopping the current zone and starting
+ * the next one back-to-back, off one single clock, closes that gap to
+ * essentially the time it takes to make two consecutive API calls.
+ */
+async function queueNextRun(remainingRuns, afterMinutes, hc, triggeredBy, programId, currentZoneId) {
+  const fireAt = new Date(Date.now() + afterMinutes * 60000);
+  if (!remainingRuns.length) {
+    // Last zone in the sequence — queue its own explicit stop rather than
+    // leaving it to Hydrawise's independent auto-stop timer, so the pump
+    // drops right when our own clock says the sequence is actually done.
+    if (currentZoneId) {
       await query(
         `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at)
-         VALUES ($1,$2,'run',$3,$4,$5)`,
-        [zone.id, programId, minutes, triggeredBy, fireAt]
+         VALUES ($1,$2,'stop',NULL,$3,$4)`,
+        [currentZoneId, programId, triggeredBy, fireAt]
       );
     }
-    cumulativeDelayMs += minutes * 60000;
+    return;
   }
+  const [next, ...rest] = remainingRuns;
+  const remainingForDb = rest.map((r) => ({ zone_id: r.zone.id, minutes: r.minutes }));
+  await query(
+    `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at, remaining_runs, previous_zone_id)
+     VALUES ($1,$2,'run',$3,$4,$5,$6,$7)`,
+    [next.zone.id, programId, next.minutes, triggeredBy, fireAt, JSON.stringify(remainingForDb), currentZoneId || null]
+  );
 }
 
 /** Same idea as dispatchSequentialRuns, but for Stop — no natural duration to space by, so a fixed safe interval is used instead. Also DB-queued for the same restart-safety reason. */
@@ -944,7 +1043,45 @@ async function runDuePendingZones(hc) {
         continue;
       }
       if (row.action === 'run') {
-        await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id);
+        // Stop the PREVIOUS zone immediately before starting this one —
+        // both off this same tick, back-to-back — rather than leaving the
+        // previous zone to expire on Hydrawise's own independent timer.
+        // See the comment on queueNextRun() above for why this pairing is
+        // what keeps a Master-Valve-driven pump running continuously
+        // through the sequence instead of dropping and re-engaging
+        // between every zone.
+        if (row.previous_zone_id) {
+          const { rows: prevRows } = await query('SELECT * FROM zones WHERE id = $1', [row.previous_zone_id]);
+          if (prevRows[0]) await hc.stopZone(prevRows[0], row.triggered_by);
+        }
+        const result = await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id);
+        // A rate-limit failure is TRANSIENT — the zone never got its
+        // command, so retry the SAME zone shortly rather than treating it
+        // as done and moving on (which is what silently dropped zones
+        // during tonight's rate-limit storm: a failed Run was logged as
+        // an error and the chain just carried on to the next zone as if
+        // it had watered). Anything else (a genuinely invalid operation,
+        // a missing zone) isn't worth retrying — log and continue.
+        if (!result.ok && /exceeded maximum|internal throttle/i.test(result.message || '')) {
+          console.log(`[pending run] zone ${zone.id} hit the rate limit — retrying in 90s instead of skipping ahead.`);
+          await query(
+            `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at, remaining_runs, previous_zone_id)
+             VALUES ($1,$2,'run',$3,$4,$5,$6,$7)`,
+            [zone.id, row.program_id, row.minutes, row.triggered_by, new Date(Date.now() + 90000), JSON.stringify(row.remaining_runs || []), row.previous_zone_id]
+          );
+          continue; // don't advance the chain — this zone hasn't actually run yet
+        }
+        // Chain the NEXT step off this zone's actual fire time (right
+        // now), not off any earlier fixed schedule — see the comment on
+        // queueNextRun() above for why that matters.
+        const remaining = row.remaining_runs || [];
+        const zoneIds = remaining.map((r) => r.zone_id);
+        const { rows: zoneObjs } = zoneIds.length ? await query('SELECT * FROM zones WHERE id = ANY($1)', [zoneIds]) : { rows: [] };
+        const byId = new Map(zoneObjs.map((z) => [z.id, z]));
+        const restRuns = remaining
+          .map((r) => ({ zone: byId.get(r.zone_id), minutes: r.minutes }))
+          .filter((r) => r.zone); // drop any zone removed since this was queued
+        await queueNextRun(restRuns, row.minutes, hc, row.triggered_by, row.program_id, zone.id);
       } else {
         await hc.stopZone(zone, row.triggered_by);
       }
@@ -953,6 +1090,43 @@ async function runDuePendingZones(hc) {
     }
   }
   if (due.length) console.log(`[pending run] fired ${due.length} queued zone command(s)`);
+}
+
+/** True if some zone is still within its watering window right now — i.e.
+ * the most recent 'run' log entry hasn't finished yet (its start time +
+ * duration is still in the future). This is the guard that was missing:
+ * nothing previously stopped a second sequence (a manual Run Now/Run All,
+ * or the scheduler) from starting while an earlier one was still
+ * mid-flight. Two independent chains both targeting the same single-
+ * zone-at-a-time controller then fight each other — each new command
+ * preempts whatever the other chain currently has running, which looks
+ * like zones firing "out of order" and getting cut short partway through
+ * (e.g. a scheduled run and a manual Run Now on the same program
+ * overlapping). Checking the actual run_log rather than pending_zone_runs
+ * matters because pending_zone_runs is briefly EMPTY during a chain's
+ * very last zone (there's nothing left to queue), which would otherwise
+ * make the system look "free" right when it's most definitely not.
+ */
+/** True if there are still queued 'stop' commands waiting to fire — used to
+ * block Stop All from being clicked again while an earlier stop-sequence
+ * is still working through its zones (see the comment where this is
+ * called for the incident this prevents). */
+async function hasPendingStops() {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS c FROM pending_zone_runs WHERE action = 'stop'`
+  );
+  return rows[0].c > 0;
+}
+
+async function isSequenceBusy() {
+  const { rows } = await query(
+    `SELECT ts, duration_minutes FROM run_log
+     WHERE action = 'run' AND zone_id IS NOT NULL AND duration_minutes IS NOT NULL
+     ORDER BY ts DESC LIMIT 1`
+  );
+  if (!rows.length) return false;
+  const finishesAt = new Date(rows[0].ts).getTime() + rows[0].duration_minutes * 60000;
+  return finishesAt > Date.now();
 }
 
 /** Starts every zone in a program (used by the scheduler and by "Run Now"). */
@@ -1005,6 +1179,15 @@ async function schedulerTick() {
         [p.id, todayDate]
       );
       if (already[0].c > 0) continue;
+
+      // Don't start this program's sequence on top of one that's still
+      // running (e.g. someone hit Run Now on it manually a few minutes
+      // before its scheduled time) — skip this tick and try again next
+      // minute rather than colliding with it.
+      if (await isSequenceBusy()) {
+        console.log(`[scheduler] Delaying "${p.name}" — another sequence is still running.`);
+        continue;
+      }
 
       const count = await runProgramZones(p, hc, 'scheduler');
       console.log(`[scheduler] Ran program "${p.name}" (${count} zones)`);

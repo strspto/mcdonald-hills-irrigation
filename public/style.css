@@ -1,180 +1,292 @@
 :root {
-  --green-900: #12331f;
-  --green-700: #1f5c37;
-  --green-600: #2c7a45;
-  --green-500: #3a9457;
-  --green-100: #eaf5ec;
-  --sand: #f4efe3;
-  --ink: #1c231d;
-  --muted: #5b6a5c;
+  /* Turf & clubhouse palette — rooted in the course itself rather than a
+     generic admin-dashboard blue or the usual AI-slop terracotta/cream
+     combo. Deep turf green for structure, warm cream for the ground,
+     water-blue for information, a muted brick-flag red for stop/delete. */
+  --green-900: #17332a;   /* deep turf — header, primary text on light */
+  --green-700: #2f6b4f;   /* fairway — primary actions */
+  --green-600: #3c8060;   /* lighter turf — hover states */
+  --green-100: #e3efe6;   /* pale turf tint — success/running backgrounds */
+  --sand: #e9e2ce;        /* cart-path tan — secondary chips, dividers */
+  --bg: #f6f3ea;          /* warm cream — page background */
+  --ink: #1c2620;         /* near-black, green-tinted — body text */
+  --muted: #6b6558;       /* warm gray — secondary text */
   --white: #ffffff;
-  --red: #b3402c;
-  --amber: #b3812c;
-  --radius: 10px;
-  --shadow: 0 1px 3px rgba(18,51,31,0.12), 0 1px 2px rgba(18,51,31,0.08);
+  --flag: #b5432f;        /* flag red — delete/stop/danger */
+  --water: #3c6e8c;       /* water-blue — informational tags, links */
+  --amber: #9c6b1f;
+  --radius: 12px;
+  --shadow: 0 1px 3px rgba(23,51,42,0.10), 0 1px 2px rgba(23,51,42,0.07);
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-body: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  background: var(--sand);
+  font-family: var(--font-body);
+  background: var(--bg);
   color: var(--ink);
+  -webkit-font-smoothing: antialiased;
 }
 
-a { color: var(--green-700); }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 600; letter-spacing: -0.01em; }
+
+a { color: var(--water); }
+
+/* ---------------------------------------------------------------- topbar / nav */
 
 .topbar {
   background: var(--green-900);
   color: var(--white);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.75rem 1.5rem;
-  flex-wrap: wrap;
-  gap: 0.5rem;
+  padding: 0.75rem 1rem 0;
 }
-
+.topbar .brand-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+  padding-bottom: 0.65rem;
+}
 .topbar .brand {
-  font-weight: 700;
-  font-size: 1.05rem;
-  letter-spacing: 0.01em;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.1rem;
+  letter-spacing: 0.005em;
 }
-.topbar .brand small { display:block; font-weight:400; opacity:0.75; font-size:0.72rem; }
-
-.nav {
-  display: flex;
-  gap: 0.25rem;
-  flex-wrap: wrap;
-}
-
-.nav a {
-  color: rgba(255,255,255,0.85);
-  text-decoration: none;
-  padding: 0.5rem 0.75rem;
-  border-radius: 8px;
-  font-size: 0.92rem;
-}
-.nav a:hover, .nav a.active { background: rgba(255,255,255,0.14); color: #fff; }
+.topbar .brand small { display:block; font-family: var(--font-body); font-weight:400; opacity:0.7; font-size:0.7rem; letter-spacing: 0.01em; }
 
 .user-chip {
-  display:flex; align-items:center; gap:0.6rem; font-size:0.85rem;
+  display:flex; align-items:center; gap:0.5rem; font-size:0.8rem; flex-shrink: 0;
 }
+.user-chip span:first-child { display: none; } /* full name hidden on phone width \u2014 role badge + logout is enough */
 .user-chip form { margin:0; }
 .user-chip button {
-  background: transparent; border: 1px solid rgba(255,255,255,0.4); color:#fff;
-  border-radius: 6px; padding: 0.3rem 0.6rem; cursor: pointer; font-size: 0.8rem;
+  background: transparent; border: 1px solid rgba(255,255,255,0.35); color:#fff;
+  border-radius: 7px; padding: 0.3rem 0.55rem; cursor: pointer; font-size: 0.76rem;
+}
+@media (min-width: 640px) {
+  .user-chip span:first-child { display: inline; }
+}
+
+/* Nav becomes a horizontally-scrolling pill row on phone widths instead
+   of wrapping into a ragged multi-line block of links \u2014 one thumb swipe
+   reaches everything, and it never eats vertical space unpredictably. */
+.nav {
+  display: flex;
+  gap: 0.3rem;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  padding-bottom: 0.65rem;
+}
+.nav::-webkit-scrollbar { display: none; }
+
+.nav a {
+  color: rgba(255,255,255,0.82);
+  text-decoration: none;
+  padding: 0.4rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.nav a:hover, .nav a.active { background: rgba(255,255,255,0.16); color: #fff; }
+@media (min-width: 640px) {
+  .nav a { font-size: 0.88rem; }
 }
 
 .mock-banner {
-  background: #fff3d6;
+  background: #fdf3dd;
   color: #6b4d05;
-  padding: 0.55rem 1.5rem;
-  font-size: 0.85rem;
-  border-bottom: 1px solid #e9d19a;
+  padding: 0.55rem 1rem;
+  font-size: 0.8rem;
+  border-bottom: 1px solid #ecd9a8;
 }
 
 .container {
   max-width: 1080px;
   margin: 0 auto;
-  padding: 1.5rem;
+  padding: 1.1rem 0.85rem 2rem;
+}
+@media (min-width: 640px) {
+  .container { padding: 1.5rem; }
 }
 
 .page-title {
   display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:0.5rem;
-  margin-bottom: 1.1rem;
+  margin-bottom: 1rem;
 }
-.page-title h1 { font-size: 1.35rem; margin: 0; }
-.page-title p { margin: 0.2rem 0 0; color: var(--muted); font-size: 0.9rem; }
+.page-title h1 { font-size: 1.3rem; margin: 0; }
+.page-title p { margin: 0.25rem 0 0; color: var(--muted); font-size: 0.88rem; }
 
 .card {
   background: var(--white);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  padding: 1.25rem;
-  margin-bottom: 1.25rem;
+  padding: 1rem;
+  margin-bottom: 1.1rem;
 }
+@media (min-width: 640px) {
+  .card { padding: 1.25rem; }
+}
+
+/* ---------------------------------------------------------------- zone grid */
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
-  gap: 0.9rem;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+}
+@media (min-width: 640px) {
+  .grid {
+    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: 0.9rem;
+  }
 }
 
 .zone-card {
-  border: 1px solid #e4ded0;
+  border: 1px solid #e6dfcd;
   border-radius: var(--radius);
-  padding: 0.9rem;
+  padding: 0.55rem 0.5rem;
   background: var(--white);
 }
-.zone-card h3 { margin: 0 0 0.15rem; font-size: 1rem; }
-.zone-card .zone-num { color: var(--muted); font-size: 0.78rem; }
+.zone-card h3 { margin: 0 0 0.15rem; font-size: 0.82rem; line-height: 1.25; font-family: var(--font-body); font-weight: 600; }
+.zone-card .zone-num { color: var(--muted); font-size: 0.68rem; }
+@media (min-width: 640px) {
+  .zone-card { padding: 0.9rem; }
+  .zone-card h3 { font-size: 0.98rem; }
+  .zone-card .zone-num { font-size: 0.78rem; }
+}
 
 .status-pill {
-  display: inline-flex; align-items:center; gap:0.35rem;
-  font-size: 0.76rem; font-weight: 600; padding: 0.2rem 0.55rem; border-radius: 999px;
-  margin: 0.5rem 0;
+  display: inline-flex; align-items:center; gap:0.3rem;
+  font-size: 0.68rem; font-weight: 600; padding: 0.15rem 0.4rem; border-radius: 999px;
+  margin: 0.35rem 0;
 }
-.status-idle { background: #eef0ea; color: var(--muted); }
-.status-running { background: #e2f4e8; color: var(--green-700); }
-.status-suspended { background: #fdeee9; color: var(--red); }
+.status-idle { background: var(--sand); color: var(--muted); }
+.status-running { background: var(--green-100); color: var(--green-700); }
+.status-suspended { background: #f8e5df; color: var(--flag); }
 
-.status-pill::before { content: ""; width:7px; height:7px; border-radius:50%; background: currentColor; }
+.status-pill::before { content: ""; width:6px; height:6px; border-radius:50%; background: currentColor; flex-shrink:0; }
 
-.zone-actions { display:flex; gap:0.4rem; margin-top:0.6rem; flex-wrap: wrap; }
+@media (min-width: 640px) {
+  .status-pill { font-size: 0.76rem; padding: 0.2rem 0.55rem; margin: 0.5rem 0; }
+  .status-pill::before { width:7px; height:7px; }
+}
+
+.zone-actions { display:flex; flex-direction: column; gap:0.3rem; margin-top:0.5rem; }
+.zone-actions form { width: 100%; }
+.zone-actions input[type=number] { width: 100% !important; }
+.zone-actions button { width: 100%; }
+@media (min-width: 640px) {
+  .zone-actions { flex-direction: row; flex-wrap: wrap; gap:0.4rem; margin-top:0.6rem; }
+  .zone-actions form { width: auto; display:flex; gap:0.3rem; align-items:center; }
+  .zone-actions input[type=number] { width: 4.2rem !important; }
+  .zone-actions button { width: auto; }
+}
+
+/* ---------------------------------------------------------------- buttons */
 
 button, .btn {
   font: inherit;
   cursor: pointer;
   border: none;
-  border-radius: 7px;
-  padding: 0.45rem 0.8rem;
+  border-radius: 8px;
+  padding: 0.5rem 0.85rem;
   font-size: 0.85rem;
-  background: var(--green-600);
+  font-weight: 500;
+  background: var(--green-700);
   color: white;
   text-decoration: none;
   display: inline-block;
 }
-button:hover, .btn:hover { background: var(--green-700); }
-button.secondary, .btn.secondary { background: var(--white); color: var(--green-700); border: 1px solid #cfd8cf; }
+button:hover, .btn:hover { background: var(--green-600); }
+button.secondary, .btn.secondary { background: var(--white); color: var(--green-700); border: 1px solid var(--sand); }
 button.secondary:hover { background: var(--green-100); }
-button.danger { background: var(--red); }
+button.danger { background: var(--flag); }
 button.danger:hover { background: #8f3121; }
-button.small, .btn.small { padding: 0.3rem 0.55rem; font-size: 0.78rem; }
-button:disabled { background:#cfd6cf; cursor:not-allowed; }
+button.small, .btn.small { padding: 0.32rem 0.6rem; font-size: 0.78rem; }
+button:disabled { background:#d8d2c0; color:#8c8578; cursor:not-allowed; }
+
+/* ---------------------------------------------------------------- tables \u2014
+   "scorecard, not spreadsheet": on a phone, a wide data table forced into
+   a narrow column just stacks every cell vertically and becomes an
+   unreadable wall of wrapped text (the exact problem being fixed here).
+   Below 640px each row becomes its own labeled card instead \u2014 the
+   thead disappears and each cell grows a small label (from its
+   data-label attribute) in front of its value. Needs data-label="\u2026" on
+   each <td> to work; falls back to a normal table with no label if it's
+   missing, so this is safe to apply broadly. */
 
 table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-th, td { text-align: left; padding: 0.55rem 0.6rem; border-bottom: 1px solid #ece7d9; }
-th { color: var(--muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+th, td { text-align: left; padding: 0.55rem 0.6rem; border-bottom: 1px solid #ece5d3; }
+th { color: var(--muted); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
+
+@media (max-width: 639px) {
+  table.responsive thead { display: none; }
+  table.responsive, table.responsive tbody, table.responsive tr, table.responsive td {
+    display: block; width: 100%;
+  }
+  table.responsive tr {
+    background: var(--white);
+    border: 1px solid #e6dfcd;
+    border-radius: var(--radius);
+    padding: 0.7rem 0.8rem;
+    margin-bottom: 0.7rem;
+  }
+  table.responsive td {
+    border-bottom: none;
+    padding: 0.3rem 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.75rem;
+    text-align: right;
+  }
+  table.responsive td[data-label]::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    text-align: left;
+    flex-shrink: 0;
+    padding-top: 0.1rem;
+  }
+  table.responsive td:not([data-label]) { justify-content: flex-start; text-align: left; }
+  table.responsive td.right { justify-content: flex-start; text-align: left; }
+  table.responsive td.right form,
+  table.responsive td.right a.btn { display: block; margin: 0.3rem 0; }
+  table.responsive td.right button, table.responsive td.right .btn { width: 100%; }
+}
 
 .form-row { margin-bottom: 0.9rem; }
 .form-row label { display:block; font-size:0.82rem; color:var(--muted); margin-bottom:0.3rem; font-weight:600; }
 input[type=text], input[type=password], input[type=number], input[type=time], select {
-  width: 100%; padding: 0.5rem 0.6rem; border: 1px solid #cfd8cf; border-radius: 7px; font: inherit;
+  width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--sand); border-radius: 8px; font: inherit;
 }
 .checkbox-row { display:flex; gap:0.5rem; flex-wrap:wrap; }
-.checkbox-row label { display:flex; align-items:center; gap:0.3rem; font-weight:500; color: var(--ink); background:#f3f6f2; padding:0.35rem 0.55rem; border-radius:7px; }
+.checkbox-row label { display:flex; align-items:center; gap:0.3rem; font-weight:500; color: var(--ink); background: var(--bg); padding:0.35rem 0.55rem; border-radius:8px; }
 .checkbox-row input { width:auto; }
 
-.day-pill { display:flex; align-items:center; justify-content:center; width:2.1rem; height:2.1rem; border-radius:50%; border:1px solid #cfd8cf; cursor:pointer; font-size:0.78rem; }
+.day-pill { display:flex; align-items:center; justify-content:center; width:2.1rem; height:2.1rem; border-radius:50%; border:1px solid var(--sand); cursor:pointer; font-size:0.78rem; }
 .day-pill input { display:none; }
-.day-pill.checked { background: var(--green-600); border-color: var(--green-600); color:#fff; }
+.day-pill.checked { background: var(--green-700); border-color: var(--green-700); color:#fff; }
 
-.type-pill { display:inline-flex; align-items:center; justify-content:center; padding:0.5rem 1rem; border-radius:999px; border:1px solid #cfd8cf; cursor:pointer; font-size:0.85rem; white-space:nowrap; }
+.type-pill { display:inline-flex; align-items:center; justify-content:center; padding:0.5rem 1rem; border-radius:999px; border:1px solid var(--sand); cursor:pointer; font-size:0.85rem; white-space:nowrap; }
 .type-pill input { display:none; }
-.type-pill.checked { background: var(--green-600); border-color: var(--green-600); color:#fff; }
+.type-pill.checked { background: var(--green-700); border-color: var(--green-700); color:#fff; }
 
-.flash { padding: 0.7rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
-.flash-success { background:#e2f4e8; color: var(--green-700); }
-.flash-error { background:#fdeee9; color: var(--red); }
+.flash { padding: 0.7rem 1rem; border-radius: 9px; margin-bottom: 1rem; font-size: 0.9rem; }
+.flash-success { background: var(--green-100); color: var(--green-700); }
+.flash-error { background: #f8e5df; color: var(--flag); }
 
-.login-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; background: linear-gradient(160deg, var(--green-900), var(--green-700)); }
-.login-card { background:white; padding:2rem; border-radius:14px; width:100%; max-width:340px; box-shadow: 0 10px 40px rgba(0,0,0,0.25); }
-.login-card h1 { font-size:1.15rem; margin-top:0; }
-.login-card .sub { color: var(--muted); font-size:0.85rem; margin-top:-0.6rem; margin-bottom:1.2rem; }
+.login-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; background: linear-gradient(160deg, var(--green-900), var(--green-700)); padding: 1rem; }
+.login-card { background:white; padding:2rem; border-radius:16px; width:100%; max-width:340px; box-shadow: 0 10px 40px rgba(0,0,0,0.25); }
+.login-card h1 { font-size:1.3rem; margin-top:0; }
+.login-card .sub { color: var(--muted); font-size:0.85rem; margin-top:-0.6rem; margin-bottom:1.2rem; font-family: var(--font-body); }
 
-.badge-role { font-size:0.72rem; text-transform:uppercase; letter-spacing:0.04em; background:#eef0ea; color:var(--muted); padding:0.15rem 0.5rem; border-radius:999px; }
+.badge-role { font-size:0.7rem; text-transform:uppercase; letter-spacing:0.04em; background: var(--sand); color:var(--muted); padding:0.15rem 0.5rem; border-radius:999px; }
 .muted { color: var(--muted); }
 .right { text-align:right; }
 .empty-state { text-align:center; padding:2rem 1rem; color: var(--muted); }
