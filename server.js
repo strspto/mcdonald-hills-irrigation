@@ -1117,12 +1117,27 @@ async function runDuePendingZones(hc) {
         // an error and the chain just carried on to the next zone as if
         // it had watered). Anything else (a genuinely invalid operation,
         // a missing zone) isn't worth retrying — log and continue.
-        if (!result.ok && /exceeded maximum|internal throttle/i.test(result.message || '')) {
-          console.log(`[pending run] zone ${zone.id} hit the rate limit — retrying in 90s instead of skipping ahead.`);
+        //
+        // IMPORTANT: an "internal throttle" failure gets a much longer
+        // retry delay than a real external Hydrawise rate-limit error.
+        // Both used to retry after the same 90s — but every retry
+        // attempt, even a failed one, still counts toward OUR OWN 5-
+        // minute throttle window. Retrying our own throttle after only
+        // 90s meant each attempt just added another counted entry that
+        // kept the SAME throttle tripped, forever — a self-sustaining
+        // loop that could never clear on its own no matter how long
+        // someone waited, since the retries themselves were the thing
+        // keeping it stuck. A real external Hydrawise error has no such
+        // feedback loop, so 90s is still fine there.
+        const isInternalThrottle = /internal throttle/i.test(result.message || '');
+        const isExternalRateLimit = !isInternalThrottle && /exceeded maximum/i.test(result.message || '');
+        if (!result.ok && (isInternalThrottle || isExternalRateLimit)) {
+          const retryDelayMs = isInternalThrottle ? 300000 : 90000;
+          console.log(`[pending run] zone ${zone.id} hit ${isInternalThrottle ? 'our own' : 'Hydrawise\'s'} rate limit — retrying in ${retryDelayMs / 1000}s instead of skipping ahead.`);
           await query(
             `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at, remaining_runs, previous_zone_id)
              VALUES ($1,$2,'run',$3,$4,$5,$6,$7)`,
-            [zone.id, row.program_id, row.minutes, row.triggered_by, new Date(Date.now() + 90000), JSON.stringify(row.remaining_runs || []), row.previous_zone_id]
+            [zone.id, row.program_id, row.minutes, row.triggered_by, new Date(Date.now() + retryDelayMs), JSON.stringify(row.remaining_runs || []), row.previous_zone_id]
           );
           continue; // don't advance the chain — this zone hasn't actually run yet
         }
@@ -1145,12 +1160,15 @@ async function runDuePendingZones(hc) {
         // good, with nothing to ever try it again. A zone whose stop
         // never lands stays physically running indefinitely.
         const result = await hc.stopZone(zone, row.triggered_by);
-        if (!result.ok && /exceeded maximum|internal throttle/i.test(result.message || '')) {
-          console.log(`[pending run] stop for zone ${zone.id} hit the rate limit — retrying in 90s instead of dropping it.`);
+        const isInternalThrottle = /internal throttle/i.test(result.message || '');
+        const isExternalRateLimit = !isInternalThrottle && /exceeded maximum/i.test(result.message || '');
+        if (!result.ok && (isInternalThrottle || isExternalRateLimit)) {
+          const retryDelayMs = isInternalThrottle ? 300000 : 90000;
+          console.log(`[pending run] stop for zone ${zone.id} hit ${isInternalThrottle ? 'our own' : 'Hydrawise\'s'} rate limit — retrying in ${retryDelayMs / 1000}s instead of dropping it.`);
           await query(
             `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at)
              VALUES ($1,$2,'stop',NULL,$3,$4)`,
-            [zone.id, row.program_id, row.triggered_by, new Date(Date.now() + 90000)]
+            [zone.id, row.program_id, row.triggered_by, new Date(Date.now() + retryDelayMs)]
           );
         }
       }
