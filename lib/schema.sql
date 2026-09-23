@@ -96,3 +96,21 @@ ALTER TABLE pending_zone_runs ADD COLUMN IF NOT EXISTS remaining_runs JSONB;
 CREATE INDEX IF NOT EXISTS idx_run_log_ts ON run_log(ts);
 CREATE INDEX IF NOT EXISTS idx_program_zones_program ON program_zones(program_id);
 CREATE INDEX IF NOT EXISTS idx_pending_zone_runs_fire_at ON pending_zone_runs(fire_at);
+
+-- run_log.program_id and pending_zone_runs.program_id used to have NO
+-- ON DELETE behavior specified (Postgres defaults to blocking the delete
+-- outright). Deleting a program that already has run history attached to
+-- it -- which any real program will, after even a little use -- hit that
+-- block as a raw foreign-key-violation error. That error was never
+-- caught in server.js, which crashed the whole Node process on an
+-- unhandled rejection (Render then showed a 502 until it auto-restarted
+-- a few seconds later, at which point the page "looked normal again" but
+-- the delete had never actually gone through). SET NULL lets a program
+-- be deleted while its old log entries stay intact -- they'll just show
+-- "Manual" as the source instead of the deleted program's name, which is
+-- correct: that entry's REAL trigger source no longer exists.
+ALTER TABLE run_log DROP CONSTRAINT IF EXISTS run_log_program_id_fkey;
+ALTER TABLE run_log ADD CONSTRAINT run_log_program_id_fkey FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE SET NULL;
+
+ALTER TABLE pending_zone_runs DROP CONSTRAINT IF EXISTS pending_zone_runs_program_id_fkey;
+ALTER TABLE pending_zone_runs ADD CONSTRAINT pending_zone_runs_program_id_fkey FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE SET NULL;

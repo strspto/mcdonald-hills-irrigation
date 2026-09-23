@@ -441,8 +441,18 @@ app.post('/programs', requireAdmin, requireCsrf, async (req, res) => {
   const action = req.body.action;
 
   if (action === 'delete') {
-    await query('DELETE FROM programs WHERE id = $1', [parseInt(req.body.id, 10)]);
-    flash(req, 'success', 'Program deleted.');
+    try {
+      await query('DELETE FROM programs WHERE id = $1', [parseInt(req.body.id, 10)]);
+      flash(req, 'success', 'Program deleted.');
+    } catch (err) {
+      // Belt-and-suspenders alongside the schema fix (run_log/
+      // pending_zone_runs now SET NULL instead of blocking the delete) —
+      // if a delete ever fails for some OTHER reason, show it plainly
+      // instead of throwing an unhandled error that used to crash the
+      // whole process.
+      console.error('[programs delete] failed:', err);
+      flash(req, 'error', "Couldn't delete that program — nothing was changed. " + (err.message || ''));
+    }
     return res.redirect('/programs');
   }
 
@@ -1293,6 +1303,33 @@ function startScheduler() {
 }
 
 // ---------------------------------------------------------------- boot
+
+// ---------------------------------------------------------------- crash safety net
+//
+// Tonight, deleting a program that had run history attached threw a raw
+// database error inside an async route handler with no try/catch. In
+// Express 4, an error thrown inside an async handler becomes an
+// unhandled promise rejection -- and on the Node version this runs on,
+// an unhandled rejection TERMINATES THE WHOLE PROCESS by default. Render
+// then shows a 502 until it notices the process died and restarts it a
+// few seconds later, at which point everything "looks normal again" --
+// but whatever action was in flight never actually completed, and the
+// same bug is free to crash the app again the next time it's triggered
+// (from this or any other route). Fixing the specific program-delete
+// case (see schema.sql) removes today's trigger. This net catches the
+// general class of bug: attaching these handlers stops Node's default
+// crash-the-process behavior for an error we didn't anticipate,
+// wherever it happens -- a request, the background scheduler tick,
+// anything -- so one bad edge case can no longer take the whole app
+// down. The specific request that hit the error will still just not
+// finish cleanly, but the app itself, the scheduler, and every other
+// user's session keep running.
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandled rejection]', err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaught exception]', err);
+});
 
 const PORT = process.env.PORT || 3000;
 
