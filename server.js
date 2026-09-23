@@ -462,7 +462,22 @@ app.post('/api/hotlist/add', requireLogin, requireCsrf, async (req, res) => {
     console.error('[hotlist add] failed:', err);
     result = { ok: false, message: 'Something went wrong adding that zone. Try again.' };
   }
-  await logRun(zone.id, null, 'run', minutes, actor, result.ok ? 'success' : 'error', `Hot List: ${result.message}`);
+  // Logged as 'queued', NOT 'run' — this records the ADD action itself
+  // (useful audit trail: who tapped what, and when), but must never be
+  // mistaken for an actual physical watering event. currentlyRunningZoneId()
+  // and isSequenceBusy() both look for the most recent successful 'run'
+  // entry to figure out what's ACTUALLY running right now; logging every
+  // Hot List tap as 'run' meant a zone that was merely queued (not yet
+  // physically started) could outrank the real running zone if it was
+  // added more recently — exactly what happened when zone 19 was added
+  // after hole 9 and briefly showed as "Running" in its place. The real
+  // physical start/stop still gets its own accurate 'run'/'stop' log
+  // entry from hc.runZone()/hc.stopZone() at the moment it actually fires
+  // — this is purely an audit note for the add itself. It also used to
+  // count toward the internal rate-limit throttle (_nearRateLimit() counts
+  // 'run'/'stop' rows) even for zones that hadn't reached Hydrawise yet —
+  // 'queued' is correctly excluded from that count too.
+  await logRun(zone.id, null, 'queued', minutes, actor, result.ok ? 'success' : 'error', `Hot List: ${result.message}`);
   res.json(result);
 });
 
