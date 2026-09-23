@@ -12,7 +12,7 @@ const { requireLogin, requireAdmin, attemptLogin, currentUser, actorLabel } = re
 const { getSetting, setSetting, logRun } = require('./lib/settings');
 const { HydrawiseClient } = require('./lib/hydrawise');
 const {
-  TZ, DAY_LABELS, e, csrfField, requireCsrf,
+  TZ, DAY_LABELS, e, csrfToken, csrfField, requireCsrf,
   daysMaskFromArray, daysMaskToLabels, nextRunTs, fmtTime, fmtDayTime, fmtLogTime,
 } = require('./lib/helpers');
 const { header, footer, flash } = require('./lib/layout');
@@ -427,6 +427,203 @@ ${busy || stopping ? `<div class="flash" style="background:var(--green-100);colo
   </form>
 </div>
 <div class="grid">${zoneCards}</div>` + footer();
+  return html;
+}
+
+// ---------------------------------------------------------------- hot list
+
+app.get('/hotlist', requireLogin, async (req, res) => {
+  res.send(await hotListPage(req));
+});
+
+// JSON feed the Hot List page polls so the queue and each zone's status
+// update live as zones start, finish, and get added, without a manual
+// reload — same pattern as /api/zone-status.
+app.get('/api/hotlist/status', requireLogin, async (req, res) => {
+  const items = await hotListQueueView();
+  res.json({
+    queue: items.map((it) => ({
+      zoneId: it.zone.id, name: it.zone.name, number: it.zone.number,
+      minutes: it.minutes, status: it.status, endsAt: it.endsAt,
+    })),
+  });
+});
+
+app.post('/api/hotlist/add', requireLogin, requireCsrf, async (req, res) => {
+  const zone = await zoneById(parseInt(req.body.zone_id, 10));
+  if (!zone) return res.status(404).json({ ok: false, message: 'Zone not found.' });
+  if (!zone.enabled) return res.status(400).json({ ok: false, message: `${zone.name} is disabled.` });
+  const minutes = Math.max(1, Math.min(180, parseInt(req.body.minutes, 10) || 5));
+  const actor = actorLabel(req);
+  let result;
+  try {
+    result = await addToHotList(zone, minutes, actor);
+  } catch (err) {
+    console.error('[hotlist add] failed:', err);
+    result = { ok: false, message: 'Something went wrong adding that zone. Try again.' };
+  }
+  await logRun(zone.id, null, 'run', minutes, actor, result.ok ? 'success' : 'error', `Hot List: ${result.message}`);
+  res.json(result);
+});
+
+// Mirrors Manual Control's Stop All exactly (same guard, same sequential-
+// stop dispatch), plus clears anything still queued to fire NEXT in the
+// Hot List's forward queue — otherwise a zone already queued could still
+// start a few seconds after Stop All was tapped.
+app.post('/api/hotlist/stopall', requireLogin, requireCsrf, async (req, res) => {
+  const actor = actorLabel(req);
+  if (await hasPendingStops()) {
+    return res.json({ ok: false, message: 'Already stopping zones — give it a moment.' });
+  }
+  await query(`DELETE FROM pending_zone_runs WHERE action = 'run'`);
+  const { rows: zones } = await query('SELECT * FROM zones WHERE enabled = true ORDER BY number');
+  const hc = await HydrawiseClient.create();
+  dispatchSequentialStops(zones, hc, actor);
+  await logRun(null, null, 'stopall', null, actor, 'success', 'Hot List: stop all');
+  res.json({ ok: true, message: 'Stopping all zones.' });
+});
+
+function hotListItemHtml(it) {
+  const label = it.status === 'running' ? 'Running' : 'Queued';
+  const pillClass = it.status === 'running' ? 'status-running' : 'status-idle';
+  const detail = it.status === 'running' && it.endsAt
+    ? `<span class="muted js-hotlist-countdown" data-ends-at="${it.endsAt}"></span>`
+    : `<span class="muted">${it.minutes} min</span>`;
+  return `
+    <div class="hotlist-row" data-zone-id="${it.zone.id}">
+      <span class="status-pill ${pillClass}">${label}</span>
+      <strong>Z${it.zone.number} ${e(it.zone.name)}</strong>
+      ${detail}
+    </div>`;
+}
+
+async function hotListPage(req) {
+  const { rows: zones } = await query('SELECT * FROM zones ORDER BY number');
+  const queue = await hotListQueueView();
+
+  const queueHtml = queue.length
+    ? queue.map(hotListItemHtml).join('')
+    : '<p class="empty-state" id="hotlist-empty">Nothing running or queued. Tap a green below to start it.</p>';
+
+  let zoneCards = '';
+  for (const z of zones) {
+    zoneCards += `
+    <div class="zone-card">
+      <div class="zone-num">Zone ${z.number}</div>
+      <h3>${e(z.name)}</h3>
+      <div class="zone-actions" style="display:flex;gap:0.3rem;align-items:center">
+        <input type="number" class="js-hotlist-minutes" min="1" max="180" value="5" style="width:4.2rem" title="Minutes" ${z.enabled ? '' : 'disabled'}>
+        <button type="button" class="small js-hotlist-add" data-zone-id="${z.id}" ${z.enabled ? '' : 'disabled'}>Add</button>
+      </div>
+    </div>`;
+  }
+
+  let html = await header(req, { title: 'Hot List', activeNav: 'hotlist' });
+  html += `
+<div class="page-title">
+  <div><h1>Hot List</h1><p>Walking the course and spotting hot greens? Tap one to add it to the running queue — it joins the line without stopping what's already watering.</p></div>
+</div>
+<div class="card">
+  <h2 style="margin-top:0;font-size:1rem">Current queue</h2>
+  <div id="hotlist-queue">${queueHtml}</div>
+  <button type="button" id="hotlist-stopall-btn" class="secondary" style="margin-top:0.75rem">Stop All</button>
+</div>
+<div class="grid">${zoneCards}</div>
+<script>
+(function() {
+  var csrf = ${JSON.stringify(csrfToken(req))};
+
+  function fmt(ms) {
+    if (ms <= 0) return 'finishing\\u2026';
+    var totalSec = Math.floor(ms / 1000);
+    var m = Math.floor(totalSec / 60);
+    var s = totalSec % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s + ' left';
+  }
+
+  function tickCountdowns() {
+    document.querySelectorAll('.js-hotlist-countdown[data-ends-at]').forEach(function(el) {
+      var endsAt = parseInt(el.getAttribute('data-ends-at'), 10);
+      if (!endsAt) return;
+      el.textContent = fmt(endsAt - Date.now());
+    });
+  }
+  tickCountdowns();
+  setInterval(tickCountdowns, 1000);
+
+  function post(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body,
+    }).then(function(r) { return r.json(); });
+  }
+
+  document.querySelectorAll('.js-hotlist-add').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var zoneId = btn.getAttribute('data-zone-id');
+      var minutesInput = btn.parentElement.querySelector('.js-hotlist-minutes');
+      var minutes = minutesInput ? minutesInput.value : 5;
+      btn.disabled = true;
+      var originalText = btn.textContent;
+      btn.textContent = 'Adding\\u2026';
+      post('/api/hotlist/add', 'csrf=' + encodeURIComponent(csrf) + '&zone_id=' + encodeURIComponent(zoneId) + '&minutes=' + encodeURIComponent(minutes))
+        .then(function(data) {
+          btn.textContent = data.ok ? 'Added \\u2713' : 'Failed';
+          if (!data.ok) console.error(data.message);
+          refreshQueue();
+        })
+        .catch(function() { btn.textContent = 'Failed'; })
+        .finally(function() {
+          setTimeout(function() { btn.disabled = false; btn.textContent = originalText; }, 1200);
+        });
+    });
+  });
+
+  var stopBtn = document.getElementById('hotlist-stopall-btn');
+  if (stopBtn) {
+    stopBtn.addEventListener('click', function() {
+      stopBtn.disabled = true;
+      post('/api/hotlist/stopall', 'csrf=' + encodeURIComponent(csrf))
+        .then(function() { refreshQueue(); })
+        .finally(function() { setTimeout(function() { stopBtn.disabled = false; }, 1500); });
+    });
+  }
+
+  function renderQueue(items) {
+    var container = document.getElementById('hotlist-queue');
+    if (!container) return;
+    if (!items.length) {
+      container.innerHTML = '<p class="empty-state" id="hotlist-empty">Nothing running or queued. Tap a green below to start it.</p>';
+      return;
+    }
+    container.innerHTML = items.map(function(it) {
+      var pillClass = it.status === 'running' ? 'status-running' : 'status-idle';
+      var label = it.status === 'running' ? 'Running' : 'Queued';
+      var detail = (it.status === 'running' && it.endsAt)
+        ? '<span class="muted js-hotlist-countdown" data-ends-at="' + it.endsAt + '"></span>'
+        : '<span class="muted">' + it.minutes + ' min</span>';
+      return '<div class="hotlist-row" data-zone-id="' + it.zoneId + '">' +
+        '<span class="status-pill ' + pillClass + '">' + label + '</span>' +
+        '<strong>Z' + it.number + ' ' + it.name.replace(/</g, '&lt;') + '</strong>' +
+        detail + '</div>';
+    }).join('');
+    tickCountdowns();
+  }
+
+  function refreshQueue() {
+    fetch('/api/hotlist/status', { headers: { 'Accept': 'application/json' } })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(data) { if (data && data.queue) renderQueue(data.queue); })
+      .catch(function() { /* next poll retries */ });
+  }
+  refreshQueue();
+  setInterval(refreshQueue, 5000);
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) refreshQueue();
+  });
+})();
+</script>` + footer();
   return html;
 }
 
@@ -1333,6 +1530,140 @@ async function runProgramZones(program, hc, triggeredBy) {
   }));
   await dispatchSequentialRuns(runs, hc, triggeredBy, program.id);
   return runs.length;
+}
+
+// ---------------------------------------------------------------- hot list
+//
+// A "Hot List" is a live, add-as-you-go queue for walking the course and
+// spot-watering whatever green needs it right now — start one, then add
+// another from wherever you are on the course a few minutes later, and it
+// just joins the line. Reuses the exact same pending_zone_runs chain the
+// scheduler and Run All already use, so the pump/Master Valve stays
+// engaged continuously across every addition, the same way it does across
+// a normal multi-zone program.
+
+/** The zone_id currently inside its active watering window right now (the
+ * most recent successful 'run' log entry that hasn't finished yet), or
+ * null if nothing is running. Same success-only logic as isSequenceBusy()
+ * above, just returning which zone instead of a plain boolean — the Hot
+ * List needs to know WHICH zone to chain the next addition off of. */
+async function currentlyRunningZoneId() {
+  const { rows } = await query(
+    `SELECT zone_id, ts, duration_minutes FROM run_log
+     WHERE action = 'run' AND zone_id IS NOT NULL AND duration_minutes IS NOT NULL AND status = 'success'
+     ORDER BY ts DESC LIMIT 1`
+  );
+  if (!rows.length) return null;
+  const finishesAt = new Date(rows[0].ts).getTime() + rows[0].duration_minutes * 60000;
+  return finishesAt > Date.now() ? rows[0].zone_id : null;
+}
+
+/**
+ * Adds one zone to whatever's already running, without ever stopping the
+ * pump between zones — the whole point of the Hot List. Three cases:
+ *
+ *  1. Nothing running at all right now: just start it, same as a normal
+ *     single-zone Run.
+ *  2. Something's running AND a 'run' row is already queued behind it
+ *     (two or more zones still ahead in line): append to that row's
+ *     remaining_runs — same JSON queue dispatchSequentialRuns/queueNextRun
+ *     already use for programs, so this new zone just joins the tail of
+ *     the same chain.
+ *  3. Something's running and it's the LAST zone in its sequence — only
+ *     its own closing 'stop' is queued (see queueNextRun's empty-
+ *     remainingRuns branch), no 'run' behind it. Swap that queued stop for
+ *     a queued 'run' of the new zone instead, at the exact same fire_at
+ *     and with the same previous_zone_id pairing the stop would have used
+ *     — so the currently-running zone still ends at precisely the right
+ *     moment, but the pump goes straight into the new zone instead of
+ *     dropping to idle and re-engaging.
+ */
+async function addToHotList(zone, minutes, triggeredBy) {
+  const hc = await HydrawiseClient.create();
+  const runningZoneId = await currentlyRunningZoneId();
+
+  if (!runningZoneId) {
+    await dispatchSequentialRuns([{ zone, minutes }], hc, triggeredBy, null);
+    return { ok: true, message: `${zone.name}: started now.` };
+  }
+
+  const { rows: runRows } = await query(
+    `SELECT * FROM pending_zone_runs WHERE action = 'run' ORDER BY fire_at ASC LIMIT 1`
+  );
+  if (runRows.length) {
+    const row = runRows[0];
+    const remaining = row.remaining_runs || [];
+    remaining.push({ zone_id: zone.id, minutes });
+    await query('UPDATE pending_zone_runs SET remaining_runs = $1 WHERE id = $2', [JSON.stringify(remaining), row.id]);
+    return { ok: true, message: `${zone.name}: added to the queue.` };
+  }
+
+  const { rows: stopRows } = await query(
+    `SELECT * FROM pending_zone_runs WHERE action = 'stop' AND zone_id = $1 ORDER BY fire_at ASC LIMIT 1`,
+    [runningZoneId]
+  );
+  if (stopRows.length) {
+    const stopRow = stopRows[0];
+    await query('DELETE FROM pending_zone_runs WHERE id = $1', [stopRow.id]);
+    await query(
+      `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at, remaining_runs, previous_zone_id)
+       VALUES ($1,NULL,'run',$2,$3,$4,$5,$6)`,
+      [zone.id, minutes, triggeredBy, stopRow.fire_at, JSON.stringify([]), runningZoneId]
+    );
+    return { ok: true, message: `${zone.name}: will start the moment the current zone finishes.` };
+  }
+
+  // Shouldn't normally happen — a running zone should always have either a
+  // queued next run or a queued closing stop. Fall back to computing the
+  // current zone's real finish time directly from run_log.
+  const { rows: curRows } = await query(
+    `SELECT ts, duration_minutes FROM run_log WHERE zone_id = $1 AND action = 'run' AND status = 'success' ORDER BY ts DESC LIMIT 1`,
+    [runningZoneId]
+  );
+  const fireAt = curRows.length
+    ? new Date(new Date(curRows[0].ts).getTime() + curRows[0].duration_minutes * 60000)
+    : new Date(Date.now() + 60000);
+  await query(
+    `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at, remaining_runs, previous_zone_id)
+     VALUES ($1,NULL,'run',$2,$3,$4,$5,$6)`,
+    [zone.id, minutes, triggeredBy, fireAt, JSON.stringify([]), runningZoneId]
+  );
+  return { ok: true, message: `${zone.name}: queued.` };
+}
+
+/** Builds the ordered list the Hot List page displays: whatever's running
+ * right now (with its real time remaining), then whatever's queued behind
+ * it in order. Read-only — safe to call as often as the page wants to
+ * poll. */
+async function hotListQueueView() {
+  const items = [];
+  const runningZoneId = await currentlyRunningZoneId();
+
+  if (runningZoneId) {
+    const zone = await zoneById(runningZoneId);
+    const { rows } = await query(
+      `SELECT ts, duration_minutes FROM run_log WHERE zone_id = $1 AND action = 'run' AND status = 'success' ORDER BY ts DESC LIMIT 1`,
+      [runningZoneId]
+    );
+    if (zone && rows.length) {
+      const endsAt = new Date(rows[0].ts).getTime() + rows[0].duration_minutes * 60000;
+      items.push({ zone, minutes: rows[0].duration_minutes, status: 'running', endsAt });
+    }
+  }
+
+  const { rows: runRows } = await query(
+    `SELECT * FROM pending_zone_runs WHERE action = 'run' ORDER BY fire_at ASC LIMIT 1`
+  );
+  if (runRows.length) {
+    const row = runRows[0];
+    const nextZone = await zoneById(row.zone_id);
+    if (nextZone) items.push({ zone: nextZone, minutes: row.minutes, status: 'queued', endsAt: null });
+    for (const r of (row.remaining_runs || [])) {
+      const z = await zoneById(r.zone_id);
+      if (z) items.push({ zone: z, minutes: r.minutes, status: 'queued', endsAt: null });
+    }
+  }
+  return items;
 }
 
 async function schedulerTick() {

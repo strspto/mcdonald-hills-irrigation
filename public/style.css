@@ -290,3 +290,7 @@ input[type=text], input[type=password], input[type=number], input[type=time], se
 .muted { color: var(--muted); }
 .right { text-align:right; }
 .empty-state { text-align:center; padding:2rem 1rem; color: var(--muted); }
+
+.hotlist-row { display:flex; align-items:center; gap:0.6rem; padding:0.5rem 0; border-bottom:1px solid var(--sand); flex-wrap:wrap; }
+.hotlist-row:last-child { border-bottom:none; }
+.hotlist-row strong { flex:1 1 auto; font-family: var(--font-body); font-weight:600; font-size:0.9rem; }
