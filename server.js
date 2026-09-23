@@ -1721,7 +1721,35 @@ async function hotListQueueView() {
 }
 
 
-async function schedulerTick() {
+/** Fires any due zone-to-zone handoffs. Checked far more often than the
+ * program schedule below (5s vs 60s) because timing here actually
+ * matters for keeping the pump engaged: Hydrawise auto-stops each zone
+ * on ITS OWN internal timer the instant that zone's `custom` duration
+ * elapses, independent of anything our own scheduler does. The
+ * stop-current/start-next pairing in runDuePendingZones() only closes
+ * the gap between zones if it actually runs close to the moment the
+ * current zone's duration ends — when this was combined with the
+ * once-a-minute program-schedule check below, a handoff could sit
+ * queued for up to ~59 seconds after Hydrawise had already dropped the
+ * previous zone, which is exactly the multi-zone gap this pairing
+ * exists to prevent (confirmed live: hole 9 → hole 18 → putting green
+ * each had a real ~1 minute pump-off gap between them, matching this
+ * tick's old 60s granularity almost exactly).
+ */
+async function pendingZonesTick() {
+  try {
+    const hc = await HydrawiseClient.create();
+    await runDuePendingZones(hc);
+  } catch (err) {
+    console.error('[pending zones] tick failed:', err);
+  }
+}
+
+/** Checks scheduled programs' start times against the clock. Program
+ * start times only ever have "HH:mm" resolution, so once a minute is as
+ * often as this ever needs to run — unlike pendingZonesTick() above,
+ * there's no benefit to checking this one more frequently. */
+async function scheduledProgramsTick() {
   try {
     const now = DateTime.now().setZone(TZ);
     const nowHM = now.toFormat('HH:mm');
@@ -1729,11 +1757,6 @@ async function schedulerTick() {
     const todayDate = now.toFormat('yyyy-MM-dd');
 
     const hc = await HydrawiseClient.create();
-
-    // Fire anything queued from an earlier sequential run/stop whose time
-    // has now arrived — this runs every tick regardless of whether a
-    // scheduled program is also firing right now.
-    await runDuePendingZones(hc);
 
     // Only 'scheduled' programs are eligible to auto-fire — on_demand programs
     // are stored with days_mask=0 anyway, but this keeps the intent explicit.
@@ -1775,11 +1798,19 @@ async function schedulerTick() {
 }
 
 function startScheduler() {
+  // Zone-to-zone handoffs: check every 5s so a stop-then-run pairing
+  // fires close to the moment it's actually due, instead of waiting up
+  // to a full minute — see pendingZonesTick() above for why this had to
+  // be split out from the program-schedule check.
+  pendingZonesTick();
+  setInterval(pendingZonesTick, 5000);
+
+  // Program start times: HH:mm resolution, so once a minute is enough.
   // Align the first tick to the top of the next minute, then run every 60s.
   const msToNextMinute = 60000 - (Date.now() % 60000);
   setTimeout(() => {
-    schedulerTick();
-    setInterval(schedulerTick, 60000);
+    scheduledProgramsTick();
+    setInterval(scheduledProgramsTick, 60000);
   }, msToNextMinute);
 }
 
