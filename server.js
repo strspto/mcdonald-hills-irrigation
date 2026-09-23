@@ -444,7 +444,7 @@ app.get('/api/hotlist/status', requireLogin, async (req, res) => {
   res.json({
     queue: items.map((it) => ({
       zoneId: it.zone.id, name: it.zone.name, number: it.zone.number,
-      minutes: it.minutes, status: it.status, endsAt: it.endsAt,
+      minutes: it.minutes, status: it.status, endsAt: it.endsAt, retryAt: it.retryAt || null,
     })),
   });
 });
@@ -484,11 +484,16 @@ app.post('/api/hotlist/stopall', requireLogin, requireCsrf, async (req, res) => 
 });
 
 function hotListItemHtml(it) {
-  const label = it.status === 'running' ? 'Running' : 'Queued';
-  const pillClass = it.status === 'running' ? 'status-running' : 'status-idle';
-  const detail = it.status === 'running' && it.endsAt
-    ? `<span class="muted js-hotlist-countdown" data-ends-at="${it.endsAt}"></span>`
-    : `<span class="muted">${it.minutes} min</span>`;
+  const label = it.status === 'running' ? 'Running' : it.status === 'retrying' ? 'Delayed' : 'Queued';
+  const pillClass = it.status === 'running' ? 'status-running' : it.status === 'retrying' ? 'status-suspended' : 'status-idle';
+  let detail;
+  if (it.status === 'running' && it.endsAt) {
+    detail = `<span class="muted js-hotlist-countdown" data-ends-at="${it.endsAt}"></span>`;
+  } else if (it.status === 'retrying' && it.retryAt) {
+    detail = `<span class="muted">rate limit — retrying at ${e(fmtTime(it.retryAt))}</span>`;
+  } else {
+    detail = `<span class="muted">${it.minutes} min</span>`;
+  }
   return `
     <div class="hotlist-row" data-zone-id="${it.zone.id}">
       <span class="status-pill ${pillClass}">${label}</span>
@@ -590,6 +595,15 @@ async function hotListPage(req) {
     });
   }
 
+  function fmtClockTime(ms) {
+    var d = new Date(ms);
+    var h = d.getHours();
+    var m = d.getMinutes();
+    var ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12; if (h === 0) h = 12;
+    return h + ':' + (m < 10 ? '0' : '') + m + ' ' + ampm;
+  }
+
   function renderQueue(items) {
     var container = document.getElementById('hotlist-queue');
     if (!container) return;
@@ -598,11 +612,16 @@ async function hotListPage(req) {
       return;
     }
     container.innerHTML = items.map(function(it) {
-      var pillClass = it.status === 'running' ? 'status-running' : 'status-idle';
-      var label = it.status === 'running' ? 'Running' : 'Queued';
-      var detail = (it.status === 'running' && it.endsAt)
-        ? '<span class="muted js-hotlist-countdown" data-ends-at="' + it.endsAt + '"></span>'
-        : '<span class="muted">' + it.minutes + ' min</span>';
+      var pillClass = it.status === 'running' ? 'status-running' : (it.status === 'retrying' ? 'status-suspended' : 'status-idle');
+      var label = it.status === 'running' ? 'Running' : (it.status === 'retrying' ? 'Delayed' : 'Queued');
+      var detail;
+      if (it.status === 'running' && it.endsAt) {
+        detail = '<span class="muted js-hotlist-countdown" data-ends-at="' + it.endsAt + '"></span>';
+      } else if (it.status === 'retrying' && it.retryAt) {
+        detail = '<span class="muted">rate limit \\u2014 retrying at ' + fmtClockTime(it.retryAt) + '</span>';
+      } else {
+        detail = '<span class="muted">' + it.minutes + ' min</span>';
+      }
       return '<div class="hotlist-row" data-zone-id="' + it.zoneId + '">' +
         '<span class="status-pill ' + pillClass + '">' + label + '</span>' +
         '<strong>Z' + it.number + ' ' + it.name.replace(/</g, '&lt;') + '</strong>' +
@@ -1657,14 +1676,35 @@ async function hotListQueueView() {
   if (runRows.length) {
     const row = runRows[0];
     const nextZone = await zoneById(row.zone_id);
-    if (nextZone) items.push({ zone: nextZone, minutes: row.minutes, status: 'queued', endsAt: null });
+    if (nextZone) {
+      // If this zone's most recent attempt failed on OUR OWN internal
+      // throttle recently, it's not really just "queued" — it's actively
+      // being held back and will retry at fire_at. Surfacing that
+      // distinction is the whole point: before this, a throttled zone
+      // just silently vanished from the visible queue for up to 5
+      // minutes with no indication anything was still going to happen,
+      // which is exactly what made a working retry look like a dropped
+      // command. See addToHotList()/runDuePendingZones() for the retry
+      // itself — this only reads the resulting state to display it.
+      const { rows: throttleRows } = await query(
+        `SELECT 1 FROM run_log WHERE zone_id = $1 AND status = 'error' AND message ILIKE '%internal throttle%' AND ts > now() - interval '10 minutes' ORDER BY ts DESC LIMIT 1`,
+        [row.zone_id]
+      );
+      const retrying = throttleRows.length > 0;
+      items.push({
+        zone: nextZone, minutes: row.minutes,
+        status: retrying ? 'retrying' : 'queued',
+        endsAt: null, retryAt: retrying ? new Date(row.fire_at).getTime() : null,
+      });
+    }
     for (const r of (row.remaining_runs || [])) {
       const z = await zoneById(r.zone_id);
-      if (z) items.push({ zone: z, minutes: r.minutes, status: 'queued', endsAt: null });
+      if (z) items.push({ zone: z, minutes: r.minutes, status: 'queued', endsAt: null, retryAt: null });
     }
   }
   return items;
 }
+
 
 async function schedulerTick() {
   try {
