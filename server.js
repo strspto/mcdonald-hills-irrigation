@@ -820,6 +820,17 @@ app.get('/settings', requireAdmin, async (req, res) => {
   const controllerId = await getSetting('hydrawise_controller_id', '');
   const mock = (await getSetting('mock_mode', '1')) === '1';
 
+  // Auto-generate the voice-control token the first time this page is
+  // viewed, so there's always a real value to show/copy without a
+  // separate "generate" step.
+  let voiceToken = await getSetting('voice_api_token', '');
+  if (!voiceToken) {
+    voiceToken = crypto.randomBytes(24).toString('hex');
+    await setSetting('voice_api_token', voiceToken);
+  }
+  const appUrl = `${req.protocol}://${req.get('host')}`;
+  const voiceRunUrl = `${appUrl}/api/voice/run?zone={zone}&minutes={minutes}&token=${voiceToken}`;
+
   let html = await header(req, { title: 'Settings', activeNav: 'settings' });
   html += `
 <div class="page-title"><div><h1>Settings</h1><p>Connect this app to your real Hydrawise account once the controller is released by the previous owner.</p></div></div>
@@ -841,8 +852,37 @@ app.get('/settings', requireAdmin, async (req, res) => {
   <p style="margin-top:1rem">Current mode: <strong>${mock ? 'Demo (simulated)' : 'Live (real controller)'}</strong></p>
   ${apiKey ? `<p style="margin-top:0.5rem"><a href="/settings/hydrawise-controllers">List Hydrawise controllers (find the right ID)</a></p>` : ''}
   ${apiKey ? `<p style="margin-top:0.5rem"><a href="/settings/hydrawise-debug">View raw Hydrawise status data (debug)</a></p>` : ''}
+</div>
+
+<div class="card" style="max-width:640px">
+  <h2 style="margin-top:0;font-size:1rem">Voice control (Alexa / Google Assistant / Siri)</h2>
+  <p class="muted" style="font-size:0.87rem">This link starts a single zone for a set number of minutes — no login needed, protected instead by the secret token built into the URL. Keep this link private; anyone who has it can start a zone. A matching Stop link is below it.</p>
+  <div class="form-row">
+    <label>Run URL (voice assistant fills in the zone and minutes)</label>
+    <textarea readonly style="width:100%;font-family:monospace;font-size:0.78rem;padding:0.5rem" rows="2" onclick="this.select()">${e(voiceRunUrl)}</textarea>
+  </div>
+  <div class="form-row">
+    <label>Stop URL</label>
+    <textarea readonly style="width:100%;font-family:monospace;font-size:0.78rem;padding:0.5rem" rows="2" onclick="this.select()">${e(`${appUrl}/api/voice/stop?zone={zone}&token=${voiceToken}`)}</textarea>
+  </div>
+  <p class="muted" style="font-size:0.8rem">
+    <strong>Google Assistant setup (via IFTTT, supports "water hole 1 for 12 minutes" style phrases):</strong><br>
+    1. Create a free account at ifttt.com<br>
+    2. New Applet → "If This" → Google Assistant → "Say a phrase with a number" → phrase template: <code>Water hole $ for $ minutes</code><br>
+    3. "Then That" → Webhooks → URL: paste the Run URL above, but replace <code>{zone}</code> with <code>{{NumberField}}</code> and <code>{minutes}</code> with <code>{{NumberField2}}</code> (IFTTT's own placeholders for the two numbers) → Method: GET
+  </p>
+  <form method="post" action="/settings/regenerate-voice-token" onsubmit="return confirm('This immediately breaks any Alexa/Google/Siri shortcuts already set up with the old link. Continue?');" style="margin-top:1rem">
+    ${csrfField(req)}
+    <button type="submit" class="secondary">Regenerate token (invalidates the link above)</button>
+  </form>
 </div>` + footer();
   res.send(html);
+});
+
+app.post('/settings/regenerate-voice-token', requireAdmin, requireCsrf, async (req, res) => {
+  await setSetting('voice_api_token', crypto.randomBytes(24).toString('hex'));
+  flash(req, 'success', 'Voice control token regenerated — update any Alexa/Google/Siri shortcuts with the new link.');
+  res.redirect('/settings');
 });
 
 app.get('/settings/hydrawise-controllers', requireAdmin, async (req, res) => {
@@ -948,6 +988,59 @@ app.get('/log', requireLogin, async (req, res) => {
 // ---------------------------------------------------------------- health check (for Render)
 
 app.get('/healthz', (req, res) => res.send('ok'));
+
+// ---------------------------------------------------------------- voice control (Alexa/Google Assistant/Siri)
+//
+// Authenticated by a long secret token instead of a login session, since
+// a voice assistant calling a webhook has no way to log in. The token is
+// generated once and stored as a setting; see /settings for the value
+// and setup instructions. Uses a timing-safe comparison so the token
+// can't be guessed faster by an attacker measuring response times.
+function timingSafeTokenMatch(expected, given) {
+  if (!expected || !given) return false;
+  const a = Buffer.from(String(expected));
+  const b = Buffer.from(String(given));
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+app.get('/api/voice/run', async (req, res) => {
+  const token = await getSetting('voice_api_token', '');
+  if (!timingSafeTokenMatch(token, req.query.token)) {
+    return res.status(403).json({ ok: false, message: 'Invalid or missing token.' });
+  }
+  const zoneNumber = parseInt(req.query.zone, 10);
+  const minutes = Math.max(1, Math.min(180, parseInt(req.query.minutes, 10) || 10));
+  if (!zoneNumber) {
+    return res.status(400).json({ ok: false, message: 'Missing or invalid zone number.' });
+  }
+  const { rows } = await query('SELECT * FROM zones WHERE number = $1', [zoneNumber]);
+  const zone = rows[0];
+  if (!zone) return res.status(404).json({ ok: false, message: `No zone numbered ${zoneNumber}.` });
+  if (!zone.enabled) return res.status(400).json({ ok: false, message: `${zone.name} is disabled.` });
+
+  const hc = await HydrawiseClient.create();
+  const r = await hc.runZone(zone, minutes, 'voice assistant');
+  res.json({ ok: r.ok, message: r.ok ? `${zone.name}: running for ${minutes} minutes.` : r.message });
+});
+
+app.get('/api/voice/stop', async (req, res) => {
+  const token = await getSetting('voice_api_token', '');
+  if (!timingSafeTokenMatch(token, req.query.token)) {
+    return res.status(403).json({ ok: false, message: 'Invalid or missing token.' });
+  }
+  const zoneNumber = parseInt(req.query.zone, 10);
+  if (!zoneNumber) {
+    return res.status(400).json({ ok: false, message: 'Missing or invalid zone number.' });
+  }
+  const { rows } = await query('SELECT * FROM zones WHERE number = $1', [zoneNumber]);
+  const zone = rows[0];
+  if (!zone) return res.status(404).json({ ok: false, message: `No zone numbered ${zoneNumber}.` });
+
+  const hc = await HydrawiseClient.create();
+  const r = await hc.stopZone(zone, 'voice assistant');
+  res.json({ ok: r.ok, message: r.ok ? `${zone.name}: stopped.` : r.message });
+});
 
 // ---------------------------------------------------------------- in-process scheduler
 //
