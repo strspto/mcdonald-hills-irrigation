@@ -912,11 +912,30 @@ ${editFormHtml}
 
 app.get('/zones', requireAdmin, async (req, res) => {
   const { rows: zones } = await query('SELECT * FROM zones ORDER BY number');
+  const { rows: radioNodes } = await query('SELECT * FROM radio_nodes ORDER BY node_id');
+  const radioRows = radioNodes.map((n) => {
+    const ageMin = n.last_seen ? Math.round((Date.now() - new Date(n.last_seen).getTime()) / 60000) : null;
+    const stale = ageMin === null || ageMin > (n.node_id === 0 ? 2 : 5);
+    return `<tr>
+      <td data-label="Node">${n.node_id === 0 ? 'Gateway' : '#' + n.node_id}</td>
+      <td data-label="Name">${e(n.name || '')}</td>
+      <td data-label="Last Seen">${ageMin === null ? 'never' : ageMin < 1 ? 'just now' : ageMin + ' min ago'}${stale ? ' <span class="muted">(offline?)</span>' : ''}</td>
+      <td data-label="Battery">${n.node_id === 0 || n.battery_v == null ? '' : Number(n.battery_v).toFixed(2) + ' V'}</td>
+      <td data-label="Signal">${n.rssi == null ? '' : n.rssi + ' dBm'}</td>
+    </tr>`;
+  }).join('');
+  const radioNodesCard = `
+<div class="card" style="margin-top:1rem">
+  <h2 style="margin-top:0">Radio Nodes</h2>
+  <p class="muted">Wireless greens: set a zone's Radio Node number above. When that zone runs, the Hydrawise zone starts the pump and the radio opens the valve at the green.</p>
+  ${radioRows ? `<table class="responsive"><thead><tr><th>Node</th><th>Name</th><th>Last Seen</th><th>Battery</th><th>Signal</th></tr></thead><tbody>${radioRows}</tbody></table>` : '<p class="muted">No radio check-ins yet.</p>'}
+</div>`;
   const rows = zones.map((z) => `
     <tr>
       <td data-label="Station">#${z.number}<input type="hidden" name="id[]" value="${z.id}"></td>
       <td data-label="Name"><input type="text" name="name[]" value="${e(z.name)}"></td>
       <td data-label="Relay ID"><input type="text" name="relay[]" value="${e(z.hydrawise_relay_id || '')}" placeholder="(optional)"></td>
+      <td data-label="Radio Node"><input type="number" name="lora[]" min="1" max="254" value="${z.lora_node_id || ''}" placeholder="wired"></td>
       <td data-label="Enabled"><input type="checkbox" name="enabled[]" value="${z.id}" ${z.enabled ? 'checked' : ''}></td>
     </tr>`).join('');
 
@@ -926,10 +945,11 @@ app.get('/zones', requireAdmin, async (req, res) => {
 <div class="card">
   <form method="post" action="/zones">
     ${csrfField(req)}
-    <table class="responsive"><thead><tr><th style="width:4rem">Station</th><th>Name</th><th style="width:10rem">Hydrawise Relay ID</th><th style="width:5rem">Enabled</th></tr></thead><tbody>${rows}</tbody></table>
+    <table class="responsive"><thead><tr><th style="width:4rem">Station</th><th>Name</th><th style="width:10rem">Hydrawise Relay ID</th><th style="width:6rem">Radio Node</th><th style="width:5rem">Enabled</th></tr></thead><tbody>${rows}</tbody></table>
     <div style="margin-top:1rem"><button type="submit">Save Zones</button></div>
   </form>
-</div>` + footer();
+</div>
+${radioNodesCard}` + footer();
   res.send(html);
 });
 
@@ -938,7 +958,9 @@ app.post('/zones', requireAdmin, requireCsrf, async (req, res) => {
   let names = req.body.name || [];
   let relays = req.body.relay || [];
   let enabled = req.body.enabled || [];
+  let loras = req.body.lora || [];
   if (!Array.isArray(ids)) ids = [ids];
+  if (!Array.isArray(loras)) loras = [loras];
   if (!Array.isArray(names)) names = [names];
   if (!Array.isArray(relays)) relays = [relays];
   if (!Array.isArray(enabled)) enabled = [enabled];
@@ -948,7 +970,9 @@ app.post('/zones', requireAdmin, requireCsrf, async (req, res) => {
     const name = (names[i] || '').trim() || `Zone ${id}`;
     const relay = (relays[i] || '').trim();
     const isEnabled = enabled.includes(String(id));
-    await query('UPDATE zones SET name=$1, hydrawise_relay_id=$2, enabled=$3 WHERE id=$4', [name, relay || null, isEnabled, id]);
+    const loraNode = parseInt(loras[i], 10);
+    await query('UPDATE zones SET name=$1, hydrawise_relay_id=$2, enabled=$3, lora_node_id=$4 WHERE id=$5',
+      [name, relay || null, isEnabled, loraNode > 0 ? loraNode : null, id]);
   }
   flash(req, 'success', 'Zones updated.');
   res.redirect('/zones');
