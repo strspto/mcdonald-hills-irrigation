@@ -114,3 +114,36 @@ ALTER TABLE run_log ADD CONSTRAINT run_log_program_id_fkey FOREIGN KEY (program_
 
 ALTER TABLE pending_zone_runs DROP CONSTRAINT IF EXISTS pending_zone_runs_program_id_fkey;
 ALTER TABLE pending_zone_runs ADD CONSTRAINT pending_zone_runs_program_id_fkey FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE SET NULL;
+
+
+-- Wireless (LoRa) greens: the same-numbered Hydrawise zone starts the pump,
+-- the radio node opens the valve. Filled in by the Pi gateway.
+ALTER TABLE zones ADD COLUMN IF NOT EXISTS lora_node_id integer;
+ALTER TABLE zones ADD COLUMN IF NOT EXISTS lora_channel integer NOT NULL DEFAULT 1;
+
+CREATE TABLE IF NOT EXISTS radio_commands (
+  id           bigserial PRIMARY KEY,
+  zone_id      integer REFERENCES zones(id) ON DELETE SET NULL,
+  node_id      integer NOT NULL,
+  channel      integer NOT NULL DEFAULT 1,
+  action       text NOT NULL CHECK (action IN ('run','stop','ping')),
+  duration_sec integer NOT NULL DEFAULT 0,
+  status       text NOT NULL DEFAULT 'pending'
+               CHECK (status IN ('pending','sending','acked','failed','expired')),
+  ack_value    integer,
+  error        text,
+  triggered_by text,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  claimed_at   timestamptz,
+  completed_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS idx_radio_commands_pending
+  ON radio_commands (created_at) WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS radio_nodes (
+  node_id    integer PRIMARY KEY,
+  name       text,
+  last_seen  timestamptz,
+  battery_v  numeric(5,2),
+  rssi       integer
+);
