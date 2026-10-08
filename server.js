@@ -1799,8 +1799,8 @@ async function scheduledProgramsTick() {
       if (nowHM < p.start_time) continue;
 
       const { rows: already } = await query(
-        `SELECT COUNT(*)::int AS c FROM run_log WHERE program_id = $1 AND action = 'run' AND ts::date = $2::date`,
-        [p.id, todayDate]
+        `SELECT COUNT(*)::int AS c FROM run_log WHERE program_id = $1 AND action = 'run' AND (ts AT TIME ZONE $3)::date = $2::date`,
+        [p.id, todayDate, TZ]
       );
       if (already[0].c > 0) continue;
 
