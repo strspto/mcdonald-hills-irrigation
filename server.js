@@ -1244,6 +1244,12 @@ app.get('/log', requireLogin, async (req, res) => {
 
 app.get('/healthz', (req, res) => res.send('ok'));
 
+// Admin-only: sends a test phone notification so you can confirm alerts reach the phone.
+app.get('/admin/test-alert', requireAdmin, async (req, res) => {
+  const ok = await require('./lib/alerts').sendPhone('Test alert', 'Irrigation alerts are working.', 3);
+  res.send(ok ? 'sent' : 'failed - check ALERT_NTFY_TOPIC and the server log');
+});
+
 // ---------------------------------------------------------------- voice control (Alexa/Google Assistant/Siri)
 //
 // Authenticated by a long secret token instead of a login session, since
@@ -1872,6 +1878,7 @@ const PORT = process.env.PORT || 3000;
 ensureSeeded()
   .then(() => {
     startScheduler();
+    require('./lib/alerts').startAlerts();
     app.listen(PORT, () => console.log(`Irrigation scheduler listening on :${PORT}`));
   })
   .catch((err) => {
