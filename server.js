@@ -1453,11 +1453,28 @@ async function runDuePendingZones(hc) {
         // what keeps a Master-Valve-driven pump running continuously
         // through the sequence instead of dropping and re-engaging
         // between every zone.
+        //
+        // Order matters for wireless greens, because each radio command takes
+        // several seconds to be confirmed. The pump must not wait on them:
+        //   1. open the NEXT valve by radio (previous pump still running),
+        //   2. stop the previous pump and start the next one, back to back,
+        //   3. only then close the PREVIOUS valve by radio.
+        // The old order (stop previous incl. its radio close, then open the
+        // next by radio, then start the pump) left the pump off for the
+        // whole of both radio round trips.
+        let prevZone = null;
         if (row.previous_zone_id) {
           const { rows: prevRows } = await query('SELECT * FROM zones WHERE id = $1', [row.previous_zone_id]);
-          if (prevRows[0]) await hc.stopZone(prevRows[0], row.triggered_by);
+          prevZone = prevRows[0] || null;
         }
-        const result = await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id);
+        let preRadio = null;
+        if (prevZone && zone.lora_node_id) {
+          preRadio = await hc.openRadioValve(zone, row.minutes, row.triggered_by);
+        }
+        let prevStop = null;
+        if (prevZone) prevStop = await hc.stopZone(prevZone, row.triggered_by, null, { deferRadio: true });
+        const result = await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id, preRadio ? { radio: preRadio } : {});
+        if (prevZone && prevStop && prevStop.ok) await hc.closeRadioValve(prevZone, row.triggered_by);
         // A rate-limit failure is TRANSIENT — the zone never got its
         // command, so retry the SAME zone shortly rather than treating it
         // as done and moving on (which is what silently dropped zones
