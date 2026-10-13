@@ -1320,6 +1320,11 @@ app.get('/api/voice/stop', async (req, res) => {
 // internal throttle, but genuine "Exceeded maximum number of requests"
 // errors straight from Hydrawise. 50s leaves real margin (~6/5min from
 // Stop All) for that other traffic to coexist safely.
+// How long before the previous zone's end the next zone is started (see
+// runDuePendingZones). Wired: worst-case 5 s tick lag + ~2 s API call.
+// Wireless next zone: also the radio open (up to 3 tries, ~8 s) first.
+const HANDOFF_LEAD_WIRED_MS = 8000;
+const HANDOFF_LEAD_WIRELESS_MS = 16000;
 const SEQUENTIAL_STOP_SPACING_MS = 50000; // 50s -> ~6 requests per 5 min, leaving headroom
 
 /**
@@ -1362,8 +1367,9 @@ const SEQUENTIAL_STOP_SPACING_MS = 50000; // 50s -> ~6 requests per 5 min, leavi
 async function dispatchSequentialRuns(runs, hc, triggeredBy, programId) {
   if (!runs.length) return;
   const [first, ...rest] = runs;
+  const startedAt = Date.now();
   await hc.runZone(first.zone, first.minutes, triggeredBy, programId);
-  await queueNextRun(rest, first.minutes, hc, triggeredBy, programId, first.zone.id);
+  await queueNextRun(rest, first.minutes, hc, triggeredBy, programId, first.zone.id, startedAt);
 }
 
 /**
@@ -1391,8 +1397,12 @@ async function dispatchSequentialRuns(runs, hc, triggeredBy, programId) {
  * the next one back-to-back, off one single clock, closes that gap to
  * essentially the time it takes to make two consecutive API calls.
  */
-async function queueNextRun(remainingRuns, afterMinutes, hc, triggeredBy, programId, currentZoneId) {
-  const fireAt = new Date(Date.now() + afterMinutes * 60000);
+async function queueNextRun(remainingRuns, afterMinutes, hc, triggeredBy, programId, currentZoneId, startedAtMs) {
+  // startedAtMs: when the current zone's controller timer actually began
+  // (captured just before its start call). Chaining off it, rather than off
+  // "now" after the radio/API work finished, keeps our clock from running
+  // late relative to the controller's own timer.
+  const fireAt = new Date((startedAtMs || Date.now()) + afterMinutes * 60000);
   if (!remainingRuns.length) {
     // Last zone in the sequence — queue its own explicit stop rather than
     // leaving it to Hydrawise's independent auto-stop timer, so the pump
@@ -1434,9 +1444,29 @@ async function dispatchSequentialStops(zones, hc, triggeredBy) {
 
 /** Fires any queued zone whose scheduled time has arrived. Called every scheduler tick (every ~60s), so a queued zone fires within about a minute of its fire_at even across a server restart. */
 async function runDuePendingZones(hc) {
-  const { rows: due } = await query(
-    `DELETE FROM pending_zone_runs WHERE fire_at <= now() RETURNING *`
+  // A zone-to-zone handoff is fired a few seconds BEFORE the previous zone's
+  // time is up, so the controller swaps zones while the previous one is
+  // still running and the pump never sees an idle moment. Measured on the
+  // course: starting the next zone exactly at the end left a 2 s pump gap
+  // wired and 4 s wireless (the controller's own timer ends the previous
+  // zone a moment before our 5 s tick, API call and radio confirmation
+  // get the next one started). The lead covers worst-case tick lag + API
+  // call (+ radio open for a wireless next zone, which happens first).
+  const { rows: cands } = await query(
+    `SELECT p.id, p.fire_at, p.action, p.previous_zone_id, z.lora_node_id
+       FROM pending_zone_runs p LEFT JOIN zones z ON z.id = p.zone_id
+      WHERE p.fire_at <= now() + interval '${HANDOFF_LEAD_WIRELESS_MS / 1000} seconds'`
   );
+  const nowMs = Date.now();
+  const dueIds = cands.filter((r) => {
+    const lead = (r.action === 'run' && r.previous_zone_id)
+      ? (r.lora_node_id ? HANDOFF_LEAD_WIRELESS_MS : HANDOFF_LEAD_WIRED_MS)
+      : 0;
+    return new Date(r.fire_at).getTime() <= nowMs + lead;
+  }).map((r) => r.id);
+  const { rows: due } = dueIds.length
+    ? await query(`DELETE FROM pending_zone_runs WHERE id = ANY($1) RETURNING *`, [dueIds])
+    : { rows: [] };
   for (const row of due) {
     try {
       const { rows: zoneRows } = await query('SELECT * FROM zones WHERE id = $1', [row.zone_id]);
@@ -1484,9 +1514,17 @@ async function runDuePendingZones(hc) {
         if (prevZone && zone.lora_node_id) {
           preRadio = await hc.openRadioValve(zone, row.minutes, row.triggered_by);
         }
+        const startedAt = Date.now();
         result = await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id, preRadio ? { radio: preRadio } : {});
         if (prevZone && prevZone.lora_node_id && result && result.ok) {
-          await hc.closeRadioValve(prevZone, row.triggered_by);
+          // The next zone was started a few seconds early (the handoff
+          // lead), so don't cut the previous wireless valve short: close it
+          // at the end of its own time. (The node also closes itself at
+          // its confirmed duration; this is the belt-and-braces confirm.)
+          const closeInMs = Math.max(0, new Date(row.fire_at).getTime() - Date.now()) + 1000;
+          setTimeout(() => {
+            hc.closeRadioValve(prevZone, row.triggered_by).catch((e) => console.error('[pending run] delayed radio close failed:', e));
+          }, closeInMs);
         }
         // A rate-limit failure is TRANSIENT — the zone never got its
         // command, so retry the SAME zone shortly rather than treating it
@@ -1529,7 +1567,7 @@ async function runDuePendingZones(hc) {
         const restRuns = remaining
           .map((r) => ({ zone: byId.get(r.zone_id), minutes: r.minutes }))
           .filter((r) => r.zone); // drop any zone removed since this was queued
-        await queueNextRun(restRuns, row.minutes, hc, row.triggered_by, row.program_id, zone.id);
+        await queueNextRun(restRuns, row.minutes, hc, row.triggered_by, row.program_id, zone.id, startedAt);
       } else {
         // Same rate-limit-retry logic as the 'run' branch above — this
         // was MISSING here, which is exactly what silently dropped
