@@ -1368,8 +1368,8 @@ async function dispatchSequentialRuns(runs, hc, triggeredBy, programId) {
   if (!runs.length) return;
   const [first, ...rest] = runs;
   const startedAt = Date.now();
-  await hc.runZone(first.zone, first.minutes, triggeredBy, programId);
-  await queueNextRun(rest, first.minutes, hc, triggeredBy, programId, first.zone.id, startedAt);
+  const firstResult = await hc.runZone(first.zone, first.minutes, triggeredBy, programId);
+  await queueNextRun(rest, first.minutes, hc, triggeredBy, programId, first.zone.id, startedAt, !(firstResult && firstResult.ok));
 }
 
 /**
@@ -1397,13 +1397,21 @@ async function dispatchSequentialRuns(runs, hc, triggeredBy, programId) {
  * the next one back-to-back, off one single clock, closes that gap to
  * essentially the time it takes to make two consecutive API calls.
  */
-async function queueNextRun(remainingRuns, afterMinutes, hc, triggeredBy, programId, currentZoneId, startedAtMs) {
+async function queueNextRun(remainingRuns, afterMinutes, hc, triggeredBy, programId, currentZoneId, startedAtMs, currentFailed = false) {
   // startedAtMs: when the current zone's controller timer actually began
   // (captured just before its start call). Chaining off it, rather than off
   // "now" after the radio/API work finished, keeps our clock from running
   // late relative to the controller's own timer.
-  const fireAt = new Date((startedAtMs || Date.now()) + afterMinutes * 60000);
+  // currentFailed: the zone we just tried never started (e.g. no radio
+  // confirmation, so no pump). Nothing is running, so waiting out its minutes
+  // is pointless — move straight on to the next zone — and there is nothing
+  // to stop, so no closing stop is queued (a stale one used to fire later and
+  // cut off a manual re-run of the same zone mid-run).
+  const fireAt = currentFailed
+    ? new Date(Date.now() + 5000)
+    : new Date((startedAtMs || Date.now()) + afterMinutes * 60000);
   if (!remainingRuns.length) {
+    if (currentFailed) return;
     // Last zone in the sequence — queue its own explicit stop rather than
     // leaving it to Hydrawise's independent auto-stop timer, so the pump
     // drops right when our own clock says the sequence is actually done.
@@ -1421,7 +1429,7 @@ async function queueNextRun(remainingRuns, afterMinutes, hc, triggeredBy, progra
   await query(
     `INSERT INTO pending_zone_runs (zone_id, program_id, action, minutes, triggered_by, fire_at, remaining_runs, previous_zone_id)
      VALUES ($1,$2,'run',$3,$4,$5,$6,$7)`,
-    [next.zone.id, programId, next.minutes, triggeredBy, fireAt, JSON.stringify(remainingForDb), currentZoneId || null]
+    [next.zone.id, programId, next.minutes, triggeredBy, fireAt, JSON.stringify(remainingForDb), currentFailed ? null : (currentZoneId || null)]
   );
 }
 
@@ -1567,7 +1575,7 @@ async function runDuePendingZones(hc) {
         const restRuns = remaining
           .map((r) => ({ zone: byId.get(r.zone_id), minutes: r.minutes }))
           .filter((r) => r.zone); // drop any zone removed since this was queued
-        await queueNextRun(restRuns, row.minutes, hc, row.triggered_by, row.program_id, zone.id, startedAt);
+        await queueNextRun(restRuns, row.minutes, hc, row.triggered_by, row.program_id, zone.id, startedAt, !(result && result.ok));
       } else {
         // Same rate-limit-retry logic as the 'run' branch above — this
         // was MISSING here, which is exactly what silently dropped
