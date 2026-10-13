@@ -1454,8 +1454,8 @@ async function runDuePendingZones(hc) {
         // through the sequence instead of dropping and re-engaging
         // between every zone.
         //
-        // Order matters for wireless greens, because each radio command takes
-        // several seconds to be confirmed. The pump must not wait on them:
+        // For anything involving a wireless green, order matters, because each
+        // radio command takes several seconds to be confirmed. The pump must not wait on them:
         //   1. open the NEXT valve by radio (previous pump still running),
         //   2. stop the previous pump and start the next one, back to back,
         //   3. only then close the PREVIOUS valve by radio.
@@ -1467,14 +1467,26 @@ async function runDuePendingZones(hc) {
           const { rows: prevRows } = await query('SELECT * FROM zones WHERE id = $1', [row.previous_zone_id]);
           prevZone = prevRows[0] || null;
         }
-        let preRadio = null;
-        if (prevZone && zone.lora_node_id) {
-          preRadio = await hc.openRadioValve(zone, row.minutes, row.triggered_by);
+        let result;
+        if (prevZone && !prevZone.lora_node_id && !zone.lora_node_id) {
+          // Wired -> wired: the controller itself switches zones when the next
+          // one is started (confirmed on the course: starting 19 while 18 ran
+          // ended 18, and the pump never dropped; the Hydrawise app's own
+          // 17 -> 18 handoff is likewise continuous). So send ONLY the run: no
+          // separate stop, no pump gap, and one fewer command against the
+          // 10-per-5-minutes limit. The previous zone's own timer is ending
+          // right now anyway.
+          result = await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id);
+        } else {
+          let preRadio = null;
+          if (prevZone && zone.lora_node_id) {
+            preRadio = await hc.openRadioValve(zone, row.minutes, row.triggered_by);
+          }
+          let prevStop = null;
+          if (prevZone) prevStop = await hc.stopZone(prevZone, row.triggered_by, null, { deferRadio: true });
+          result = await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id, preRadio ? { radio: preRadio } : {});
+          if (prevZone && prevStop && prevStop.ok) await hc.closeRadioValve(prevZone, row.triggered_by);
         }
-        let prevStop = null;
-        if (prevZone) prevStop = await hc.stopZone(prevZone, row.triggered_by, null, { deferRadio: true });
-        const result = await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id, preRadio ? { radio: preRadio } : {});
-        if (prevZone && prevStop && prevStop.ok) await hc.closeRadioValve(prevZone, row.triggered_by);
         // A rate-limit failure is TRANSIENT — the zone never got its
         // command, so retry the SAME zone shortly rather than treating it
         // as done and moving on (which is what silently dropped zones
