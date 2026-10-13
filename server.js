@@ -1468,24 +1468,25 @@ async function runDuePendingZones(hc) {
           prevZone = prevRows[0] || null;
         }
         let result;
-        if (prevZone && !prevZone.lora_node_id && !zone.lora_node_id) {
-          // Wired -> wired: the controller itself switches zones when the next
-          // one is started (confirmed on the course: starting 19 while 18 ran
-          // ended 18, and the pump never dropped; the Hydrawise app's own
-          // 17 -> 18 handoff is likewise continuous). So send ONLY the run: no
-          // separate stop, no pump gap, and one fewer command against the
-          // 10-per-5-minutes limit. The previous zone's own timer is ending
-          // right now anyway.
-          result = await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id);
-        } else {
-          let preRadio = null;
-          if (prevZone && zone.lora_node_id) {
-            preRadio = await hc.openRadioValve(zone, row.minutes, row.triggered_by);
-          }
-          let prevStop = null;
-          if (prevZone) prevStop = await hc.stopZone(prevZone, row.triggered_by, null, { deferRadio: true });
-          result = await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id, preRadio ? { radio: preRadio } : {});
-          if (prevZone && prevStop && prevStop.ok) await hc.closeRadioValve(prevZone, row.triggered_by);
+        // Every zone, wired or wireless, is a real zone on the controller (a
+        // wireless green's Hydrawise zone just starts the pump), and the
+        // controller itself switches zones when the next one is started:
+        // confirmed on the course for wired 18 -> 19 and in the app 17 -> 18.
+        // So the handoff sends ONLY the run for the next zone, never a
+        // separate stop for the previous one (a stop followed by a start is two
+        // sequential API calls, ~5-7 s of pump-off). The previous zone's own
+        // timer is ending right now anyway. Wireless valves are handled around
+        // that single call so the pump never waits on a radio round trip:
+        //   1. open the NEXT valve by radio (previous pump still running),
+        //   2. start the next zone on the controller (it swaps),
+        //   3. only then close the PREVIOUS valve by radio.
+        let preRadio = null;
+        if (prevZone && zone.lora_node_id) {
+          preRadio = await hc.openRadioValve(zone, row.minutes, row.triggered_by);
+        }
+        result = await hc.runZone(zone, row.minutes, row.triggered_by, row.program_id, preRadio ? { radio: preRadio } : {});
+        if (prevZone && prevZone.lora_node_id && result && result.ok) {
+          await hc.closeRadioValve(prevZone, row.triggered_by);
         }
         // A rate-limit failure is TRANSIENT — the zone never got its
         // command, so retry the SAME zone shortly rather than treating it
