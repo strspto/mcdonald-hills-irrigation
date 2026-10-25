@@ -804,15 +804,28 @@ async function programsPage(req) {
 
   let editFormHtml = '';
   if (isAdmin && editing) {
-    const zoneRows = allZones.map((z) => {
+    // The zones run in the order they are saved (program_zones.sort_order, set
+    // from the row order of this form). List the program's own zones first, in
+    // their saved order, then every other zone by number, so the editor shows
+    // the real run order instead of always resetting it to 1, 2, 3...
+    const inProgram = editingZones
+      .map((ez) => allZones.find((z) => z.id === ez.zone_id))
+      .filter(Boolean);
+    const notInProgram = allZones.filter((z) => !inProgram.includes(z));
+    const zoneRows = [...inProgram, ...notInProgram].map((z) => {
       const existing = editingZones.find((ez) => ez.zone_id === z.id);
       return `
-      <tr>
-        <td><input type="checkbox" onchange="document.getElementById('dur-${z.id}').disabled = !this.checked; document.getElementById('zid-${z.id}').disabled = !this.checked;" ${existing ? 'checked' : ''}></td>
+      <tr data-number="${z.number}">
+        <td class="zorder" style="text-align:center;font-weight:600"></td>
+        <td><input type="checkbox" onchange="document.getElementById('dur-${z.id}').disabled = !this.checked; document.getElementById('zid-${z.id}').disabled = !this.checked; onZoneToggle(this);" ${existing ? 'checked' : ''}></td>
         <td>Zone ${z.number} — ${e(z.name)}</td>
         <td>
           <input type="hidden" id="zid-${z.id}" name="zone_id[]" value="${z.id}" ${existing ? '' : 'disabled'}>
           <input type="number" id="dur-${z.id}" name="duration[]" min="1" max="180" value="${existing ? existing.duration_minutes : 10}" ${existing ? '' : 'disabled'}>
+        </td>
+        <td style="white-space:nowrap">
+          <button type="button" class="small secondary zup" onclick="moveZoneRow(this,-1)" title="Run earlier">▲</button>
+          <button type="button" class="small secondary zdown" onclick="moveZoneRow(this,1)" title="Run later">▼</button>
         </td>
       </tr>`;
     }).join('');
@@ -853,11 +866,56 @@ async function programsPage(req) {
         <div class="form-row"><label><input type="checkbox" name="enabled" ${editing.enabled ? 'checked' : ''} style="width:auto"> Enabled</label></div>
         <div class="form-row">
           <label>Zones &amp; run time (minutes each)</label>
-          <table><thead><tr><th style="width:2rem"></th><th>Zone</th><th style="width:8rem">Minutes</th></tr></thead><tbody>${zoneRows}</tbody></table>
+          <p class="muted" style="font-size:0.82rem;margin:0 0 0.5rem">Zones run in the order shown by the numbers, starting at 1. Tick a zone to add it to the end of the order, and use the arrows to move it earlier or later.</p>
+          <table><thead><tr><th style="width:2.5rem">Order</th><th style="width:2rem"></th><th>Zone</th><th style="width:8rem">Minutes</th><th style="width:5.5rem"></th></tr></thead><tbody id="zone-rows">${zoneRows}</tbody></table>
         </div>
         <button type="submit">Save Program</button>
         <a href="/programs" class="btn secondary">Cancel</a>
       </form>
+      <script>
+      function zoneChecked(tr) { return tr.querySelector('input[type=checkbox]').checked; }
+      function renumberZones() {
+        var rows = Array.prototype.slice.call(document.querySelectorAll('#zone-rows tr'));
+        var n = 0;
+        rows.forEach(function (tr, i) {
+          var on = zoneChecked(tr);
+          tr.querySelector('.zorder').textContent = on ? ++n : '';
+          var prevOn = false, nextOn = false, j;
+          for (j = i - 1; j >= 0; j--) { if (zoneChecked(rows[j])) { prevOn = true; break; } }
+          for (j = i + 1; j < rows.length; j++) { if (zoneChecked(rows[j])) { nextOn = true; break; } }
+          tr.querySelector('.zup').disabled = !(on && prevOn);
+          tr.querySelector('.zdown').disabled = !(on && nextOn);
+        });
+      }
+      function moveZoneRow(btn, dir) {
+        var tr = btn.closest('tr');
+        var sib = dir < 0 ? tr.previousElementSibling : tr.nextElementSibling;
+        while (sib && !zoneChecked(sib)) { sib = dir < 0 ? sib.previousElementSibling : sib.nextElementSibling; }
+        if (!sib) return;
+        if (dir < 0) { tr.parentNode.insertBefore(tr, sib); } else { tr.parentNode.insertBefore(sib, tr); }
+        renumberZones();
+      }
+      function onZoneToggle(cb) {
+        var tr = cb.closest('tr');
+        var body = tr.parentNode;
+        var rows = Array.prototype.slice.call(body.querySelectorAll('tr')).filter(function (r) { return r !== tr; });
+        var i;
+        if (cb.checked) {
+          var last = null;
+          rows.forEach(function (r) { if (zoneChecked(r)) last = r; });
+          body.insertBefore(tr, last ? last.nextSibling : body.firstChild);
+        } else {
+          var num = parseInt(tr.getAttribute('data-number'), 10);
+          var before = null;
+          for (i = 0; i < rows.length; i++) {
+            if (!zoneChecked(rows[i]) && parseInt(rows[i].getAttribute('data-number'), 10) > num) { before = rows[i]; break; }
+          }
+          body.insertBefore(tr, before);
+        }
+        renumberZones();
+      }
+      renumberZones();
+      </script>
     </div>`;
   }
 
