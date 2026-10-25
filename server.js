@@ -936,6 +936,7 @@ app.get('/zones', requireAdmin, async (req, res) => {
       <td data-label="Name"><input type="text" name="name[]" value="${e(z.name)}"></td>
       <td data-label="Relay ID"><input type="text" name="relay[]" value="${e(z.hydrawise_relay_id || '')}" placeholder="(optional)"></td>
       <td data-label="Radio Node"><input type="number" name="lora[]" min="1" max="254" value="${z.lora_node_id || ''}" placeholder="wired"></td>
+      <td data-label="Start pump if no radio reply">${z.lora_node_id ? `<input type="checkbox" name="unconfirmed[]" value="${z.id}" ${z.lora_start_unconfirmed ? 'checked' : ''}>` : '<span class="muted">wired</span>'}</td>
       <td data-label="Enabled"><input type="checkbox" name="enabled[]" value="${z.id}" ${z.enabled ? 'checked' : ''}></td>
     </tr>`).join('');
 
@@ -945,7 +946,8 @@ app.get('/zones', requireAdmin, async (req, res) => {
 <div class="card">
   <form method="post" action="/zones">
     ${csrfField(req)}
-    <table class="responsive"><thead><tr><th style="width:4rem">Station</th><th>Name</th><th style="width:10rem">Hydrawise Relay ID</th><th style="width:6rem">Radio Node</th><th style="width:5rem">Enabled</th></tr></thead><tbody>${rows}</tbody></table>
+    <table class="responsive"><thead><tr><th style="width:4rem">Station</th><th>Name</th><th style="width:10rem">Hydrawise Relay ID</th><th style="width:6rem">Radio Node</th><th style="width:8rem">Start pump if no radio reply</th><th style="width:5rem">Enabled</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="muted" style="margin-top:0.75rem">"Start pump if no radio reply" is for a wireless green whose node hears commands but whose reply is sometimes lost. When the node never answers, the pump starts anyway for the requested time and the Run Log shows a red warning. Only use it where the pump has a bypass, since the valve may not actually have opened. A node that refuses, or a gateway that is offline, never starts the pump.</p>
     <div style="margin-top:1rem"><button type="submit">Save Zones</button></div>
   </form>
 </div>
@@ -959,6 +961,8 @@ app.post('/zones', requireAdmin, requireCsrf, async (req, res) => {
   let relays = req.body.relay || [];
   let enabled = req.body.enabled || [];
   let loras = req.body.lora || [];
+  let unconfirmed = req.body.unconfirmed || [];
+  if (!Array.isArray(unconfirmed)) unconfirmed = [unconfirmed];
   if (!Array.isArray(ids)) ids = [ids];
   if (!Array.isArray(loras)) loras = [loras];
   if (!Array.isArray(names)) names = [names];
@@ -971,8 +975,10 @@ app.post('/zones', requireAdmin, requireCsrf, async (req, res) => {
     const relay = (relays[i] || '').trim();
     const isEnabled = enabled.includes(String(id));
     const loraNode = parseInt(loras[i], 10);
-    await query('UPDATE zones SET name=$1, hydrawise_relay_id=$2, enabled=$3, lora_node_id=$4 WHERE id=$5',
-      [name, relay || null, isEnabled, loraNode > 0 ? loraNode : null, id]);
+    // Only meaningful for a wireless zone; a wired zone is always saved as off.
+    const startUnconfirmed = loraNode > 0 && unconfirmed.includes(String(id));
+    await query('UPDATE zones SET name=$1, hydrawise_relay_id=$2, enabled=$3, lora_node_id=$4, lora_start_unconfirmed=$5 WHERE id=$6',
+      [name, relay || null, isEnabled, loraNode > 0 ? loraNode : null, startUnconfirmed, id]);
   }
   flash(req, 'success', 'Zones updated.');
   res.redirect('/zones');
