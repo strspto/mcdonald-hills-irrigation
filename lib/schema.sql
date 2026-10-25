@@ -120,6 +120,10 @@ ALTER TABLE pending_zone_runs ADD CONSTRAINT pending_zone_runs_program_id_fkey F
 -- the radio node opens the valve. Filled in by the Pi gateway.
 ALTER TABLE zones ADD COLUMN IF NOT EXISTS lora_node_id integer;
 ALTER TABLE zones ADD COLUMN IF NOT EXISTS lora_channel integer NOT NULL DEFAULT 1;
+-- Opt-in, per wireless zone: if the node never answers the run command (the
+-- gateway tried and got silence), start the pump anyway instead of skipping the
+-- zone. Only safe where the pump has a bypass, so it is OFF unless switched on.
+ALTER TABLE zones ADD COLUMN IF NOT EXISTS lora_start_unconfirmed boolean NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS radio_commands (
   id           bigserial PRIMARY KEY,
